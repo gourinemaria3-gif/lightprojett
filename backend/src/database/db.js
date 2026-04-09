@@ -1,15 +1,15 @@
-// Importer la librairie better-sqlite3 pour gérer SQLite
 const Database = require("better-sqlite3");
-// Importer le module path pour gérer les chemins de fichiers
-const path = require("path");
+const path     = require("path");
 
-// Créer/ouvrir la base de données
 const db = new Database(path.join(__dirname, "lightproject.db"));
 
-// Créer la table si elle n'existe pas
+// ══════════════════════════════════════════════════════════════
+//  SCHÉMA
+// ══════════════════════════════════════════════════════════════
 db.exec(`
   CREATE TABLE IF NOT EXISTS projects_meta (
     project_id    INTEGER PRIMARY KEY,
+    start_date    TEXT,
     end_date      TEXT,
     workload      REAL,
     manager_id    INTEGER,
@@ -17,29 +17,62 @@ db.exec(`
   )
 `);
 
-// Sauvegarder les métadonnées d'un projet
-function saveProjectMeta(projectId, { endDate, workload, managerId }) {
-  const stmt = db.prepare(`
-    INSERT INTO projects_meta (project_id, end_date, workload, manager_id)
-    VALUES (?, ?, ?, ?)
+// Migration douce : ajoute start_date si la table existait avant cette modification
+try {
+  db.exec(`ALTER TABLE projects_meta ADD COLUMN start_date TEXT`);
+} catch (_) {
+  // Colonne déjà présente — on ignore silencieusement
+}
+
+// ══════════════════════════════════════════════════════════════
+//  FONCTIONS
+// ══════════════════════════════════════════════════════════════
+
+/**
+ * Insère ou met à jour les métadonnées d'un projet.
+ * better-sqlite3 est synchrone — les erreurs sont des exceptions JS normales.
+ */
+function saveProjectMeta(projectId, { startDate, endDate, workload, managerId }) {
+  db.prepare(`
+    INSERT INTO projects_meta (project_id, start_date, end_date, workload, manager_id)
+    VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(project_id) DO UPDATE SET
+      start_date = excluded.start_date,
       end_date   = excluded.end_date,
       workload   = excluded.workload,
       manager_id = excluded.manager_id
-  `);
-  stmt.run(projectId, endDate || null, workload || null, managerId || null);
+  `).run(
+    projectId,
+    startDate || null,
+    endDate   || null,
+    workload  ? Number(workload) : null,
+    managerId || null
+  );
 }
 
-// Récupérer les métadonnées d'un projet
 function getProjectMeta(projectId) {
-  return db.prepare(`
-    SELECT * FROM projects_meta WHERE project_id = ?
-  `).get(projectId);
+  return db.prepare(
+    `SELECT * FROM projects_meta WHERE project_id = ?`
+  ).get(projectId);
 }
 
-// Récupérer toutes les métadonnées
 function getAllProjectsMeta() {
   return db.prepare(`SELECT * FROM projects_meta`).all();
 }
 
-module.exports = { saveProjectMeta, getProjectMeta, getAllProjectsMeta };
+/**
+ * Supprime les métadonnées d'un projet.
+ * Appelée lors du rollback si la création OpenProject échoue après sauvegarde SQLite.
+ */
+function deleteProjectMeta(projectId) {
+  db.prepare(
+    `DELETE FROM projects_meta WHERE project_id = ?`
+  ).run(projectId);
+}
+
+module.exports = {
+  saveProjectMeta,
+  getProjectMeta,
+  getAllProjectsMeta,
+  deleteProjectMeta,
+};

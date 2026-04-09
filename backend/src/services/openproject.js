@@ -1,91 +1,115 @@
-// Importer la librairie axios pour faire des requêtes HTTP vers l'API OpenProject
 const axios = require("axios");
-// Récupérer l'URL et token depuis (.env)
+
 const BASE_URL = process.env.OP_BASE_URL;
-const TOKEN    = process.env.OP_TOKEN;
-// Créer l'en-tête d'authentification pour toutes les requêtes
-// OpenProject utilise l'authentification Basic avec "apikey:TOKEN"
-const authHeader = {
-  Authorization: "Basic " + Buffer.from("apikey:" + TOKEN).toString("base64"),
-  "Content-Type": "application/json",
-};
 
-// Récupère tous les projets
-async function getProjects() {
-  const res = await axios.get(`${BASE_URL}/api/v3/projects?pageSize=50`, {
-    headers: authHeader,
-  });
-  return res.data._embedded.elements;
-}
-
-// Récupère les tâches d'un projet
-async function getTasks(projectId) {
-  const filters = encodeURIComponent(
-    JSON.stringify([{ project: { operator: "=", values: [String(projectId)] } }])
-  );
-  const res = await axios.get(
-    `${BASE_URL}/api/v3/work_packages?filters=${filters}&pageSize=100`,
-    { headers: authHeader }
-  );
-  return res.data._embedded.elements;
-}
-
-// Récupère tous les utilisateurs
-async function getMembers() {
-  const res = await axios.get(`${BASE_URL}/api/v3/users?pageSize=50`, {
-    headers: authHeader,
-  });
-  return res.data._embedded.elements;
-}
-
-// Crée un projet dans OpenProject
-async function createProject(data) {
-  // Construire le corps (body) de la requête
-  const body = {
-    name: data.title,
-     // Identifier unique du projet (généré automatiquement)
-    identifier: data.title
-      .toLowerCase()
-      .replace(/\s+/g, "-")
-      .replace(/[^a-z0-9-]/g, "")
-      .slice(0, 100),
-    description: {
-      format: "markdown",
-      raw: data.description,
-    },
-    _links: {},
+function makeAuthHeader(opToken) {
+  return {
+    Authorization: "Basic " + Buffer.from(`apikey:${opToken}`).toString("base64"),
+    "Content-Type": "application/json",
   };
-
-  const res = await axios.post(`${BASE_URL}/api/v3/projects`, body, {
-    headers: authHeader,
-  });
-  return res.data;
 }
 
-async function createTask(projectId, task) {
-  const typesRes = await axios.get(
+// ══════════════════════════════════════════════════════════════
+//  HELPERS INTERNES
+// ══════════════════════════════════════════════════════════════
+
+// Cache des types par projet — évite N appels API pour N tâches
+const _typesCache = {};
+
+async function _getTaskType(projectId, opToken) {
+  if (_typesCache[projectId]) return _typesCache[projectId];
+
+  const res = await axios.get(
     `${BASE_URL}/api/v3/projects/${projectId}/types`,
-    { headers: authHeader }
+    { headers: makeAuthHeader(opToken) }
   );
-  const types = typesRes.data._embedded.elements;
+  const types = res.data._embedded.elements;
   const taskType =
     types.find((t) =>
       t.name.toLowerCase().includes("task") ||
       t.name.toLowerCase().includes("tâche")
     ) || types[0];
 
-  // Convertir heures → format ISO 8601 attendu par OpenProject
-  function toIsoDuration(hours) {
-    const h = parseFloat(hours);
-    if (!hours || isNaN(h) || h <= 0) return null;
-    return `PT${h}H`;
-  }
+  _typesCache[projectId] = taskType;
+  return taskType;
+}
 
+// Convertit des heures en durée ISO 8601 (ex: 8 → "PT8H")
+function _toIsoDuration(hours) {
+  const h = parseFloat(hours);
+  if (!hours || isNaN(h) || h <= 0) return null;
+  return `PT${h}H`;
+}
+
+// ══════════════════════════════════════════════════════════════
+//  PROJETS
+// ══════════════════════════════════════════════════════════════
+async function getProjects(opToken) {
+  const res = await axios.get(`${BASE_URL}/api/v3/projects?pageSize=50`, {
+    headers: makeAuthHeader(opToken),
+  });
+  return res.data._embedded.elements;
+}
+
+async function createProject(data, opToken) {
   const body = {
-    subject: task.title,
+    name: data.title.trim(),
+    identifier: data.title
+      .toLowerCase()
+      .trim()
+      .replace(/\s+/g, "-")
+      .replace(/[^a-z0-9-]/g, "")
+      .slice(0, 100),
     description: {
       format: "markdown",
-      raw: task.description || "",
+      raw: data.description.trim(),
+    },
+    _links: {},
+  };
+
+  const res = await axios.post(`${BASE_URL}/api/v3/projects`, body, {
+    headers: makeAuthHeader(opToken), // ✅ corrigé
+  });
+  return res.data;
+}
+
+// Utilisé pour le rollback si la création des tâches échoue
+async function deleteProject(projectId, opToken) {
+  await axios.delete(`${BASE_URL}/api/v3/projects/${projectId}`, {
+    headers: makeAuthHeader(opToken),
+  });
+}
+
+// ══════════════════════════════════════════════════════════════
+//  TÂCHES
+// ══════════════════════════════════════════════════════════════
+async function getTasks(projectId, opToken) {
+  const filters = encodeURIComponent(
+    JSON.stringify([{ project: { operator: "=", values: [String(projectId)] } }])
+  );
+  const res = await axios.get(
+    `${BASE_URL}/api/v3/work_packages?filters=${filters}&pageSize=100`,
+    { headers: makeAuthHeader(opToken) } // ✅ corrigé
+  );
+  return res.data._embedded.elements;
+}
+
+/**
+ * Crée une tâche dans un projet OpenProject.
+ * Fonction partagée — utilisée par la route création projet ET la route tâches.
+ *
+ * @param {number} projectId
+ * @param {{ title, description, estimatedHours, startDate, dueDate }} task
+ * @param {string} opToken
+ */
+async function createTask(projectId, task, opToken) {
+  const taskType = await _getTaskType(projectId, opToken);
+
+  const body = {
+    subject: task.title.trim(),
+    description: {
+      format: "markdown",
+      raw: task.description?.trim() || "",
     },
     _links: {
       project: { href: `/api/v3/projects/${projectId}` },
@@ -93,18 +117,80 @@ async function createTask(projectId, task) {
     },
   };
 
-  // Ajouter les champs optionnels seulement s'ils ont une valeur
-  if (task.startDate) body.startDate = task.startDate;
-  if (task.dueDate)   body.dueDate   = task.dueDate;
-  const duration = toIsoDuration(task.estimatedHours);
-  if (duration)       body.estimatedTime = duration;
-
-  console.log("=== BODY ENVOYÉ À OPENPROJECT ===", JSON.stringify(body, null, 2));
+  if (task.startDate)  body.startDate     = task.startDate;
+  if (task.dueDate)    body.dueDate       = task.dueDate;
+  const duration = _toIsoDuration(task.estimatedHours);
+  if (duration)        body.estimatedTime = duration;
 
   const res = await axios.post(`${BASE_URL}/api/v3/work_packages`, body, {
-    headers: authHeader,
+    headers: makeAuthHeader(opToken), // ✅ corrigé
   });
   return res.data;
 }
-// Exporter toutes les fonctions pour pouvoir les utiliser dans les routes
-module.exports = { getProjects, getTasks, getMembers, createProject, createTask };
+
+/**
+ * Met à jour partiellement une tâche existante.
+ * OpenProject exige le lockVersion pour les PATCH.
+ *
+ * @param {number} taskId
+ * @param {{ lockVersion?, subject?, description?, startDate?, dueDate?, estimatedHours? }} data
+ * @param {string} opToken
+ */
+async function patchTask(taskId, data, opToken) {
+  // Récupérer la version actuelle si non fournie (nécessaire pour OpenProject)
+  let lockVersion = data.lockVersion;
+  if (lockVersion === undefined || lockVersion === null) {
+    const current = await axios.get(
+      `${BASE_URL}/api/v3/work_packages/${taskId}`,
+      { headers: makeAuthHeader(opToken) }
+    );
+    lockVersion = current.data.lockVersion;
+  }
+
+  // Construire uniquement les champs fournis
+  const body = { lockVersion };
+
+  if (data.subject !== undefined)
+    body.subject = data.subject;
+
+  if (data.description !== undefined)
+    body.description = { format: "markdown", raw: data.description };
+
+  if (data.startDate !== undefined)
+    body.startDate = data.startDate;
+
+  if (data.dueDate !== undefined)
+    body.dueDate = data.dueDate;
+
+  if (data.estimatedHours !== undefined) {
+    const duration = _toIsoDuration(data.estimatedHours);
+    if (duration) body.estimatedTime = duration;
+  }
+
+  const res = await axios.patch(
+    `${BASE_URL}/api/v3/work_packages/${taskId}`,
+    body,
+    { headers: makeAuthHeader(opToken) } // ✅ corrigé
+  );
+  return res.data;
+}
+
+// ══════════════════════════════════════════════════════════════
+//  MEMBRES
+// ══════════════════════════════════════════════════════════════
+async function getMembers(opToken) {
+  const res = await axios.get(`${BASE_URL}/api/v3/users?pageSize=50`, {
+    headers: makeAuthHeader(opToken),
+  });
+  return res.data._embedded.elements;
+}
+
+module.exports = {
+  getProjects,
+  createProject,
+  deleteProject,
+  getTasks,
+  createTask,
+  patchTask,
+  getMembers,
+};
