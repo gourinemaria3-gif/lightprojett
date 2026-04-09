@@ -1,0 +1,256 @@
+.pp-page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 52px 28px;
+}
+
+/* Header */
+.pp-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  margin-bottom: 36px;
+  gap: 20px;
+}
+
+.pp-eyebrow {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--coral);
+  margin-bottom: 10px;
+}
+
+.pp-title {
+  font-family: 'Playfair Display', serif;
+  font-size: clamp(28px, 4vw, 44px);
+  font-weight: 700;
+  color: var(--white);
+  line-height: 1.1;
+  margin-bottom: 6px;
+}
+
+.pp-title span { color: var(--yellow); }
+
+.pp-sub {
+  font-size: 13px;
+  color: var(--yellow);
+  opacity: 0.5;
+}
+
+.pp-new-btn {
+  background: var(--yellow);
+  color: var(--blue-dark);
+  border: none;
+  border-radius: 10px;
+  padding: 11px 20px;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity 0.2s;
+  flex-shrink: 0;
+}
+
+.pp-new-btn:hover { opacity: 0.85; }
+
+/* Search */
+.pp-search {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--blue-mid);
+  border: 1px solid rgba(248, 233, 161, 0.12);
+  border-radius: 10px;
+  padding: 11px 16px;
+  margin-bottom: 24px;
+  transition: border-color 0.2s;
+}
+
+.pp-search:focus-within { border-color: var(--yellow); }
+
+.pp-search input {
+  flex: 1;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--white);
+  font-family: 'DM Sans', sans-serif;
+  font-size: 14px;
+}
+
+.pp-search input::placeholder { color: var(--yellow); opacity: 0.3; }
+
+.pp-search-count {
+  font-size: 12px;
+  color: var(--yellow);
+  opacity: 0.5;
+}
+
+/* Table */
+.pp-table-wrap {
+  border-radius: 16px;
+  overflow: hidden;
+  border: 1px solid rgba(248, 233, 161, 0.1);
+}
+
+.pp-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.pp-table thead tr {
+  background: rgba(248, 233, 161, 0.06);
+}
+
+.pp-table thead th {
+  padding: 14px 20px;
+  text-align: left;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--yellow);
+  opacity: 0.6;
+  border-bottom: 1px solid rgba(248, 233, 161, 0.08);
+}
+
+/* Row */
+.pp-row {
+  background: var(--blue-mid);
+  cursor: pointer;
+  transition: background 0.2s;
+  animation: fadeUp 0.4s ease both;
+}
+
+.pp-row:hover { background: rgba(55, 71, 133, 0.7); }
+
+.pp-row:not(:last-child) td {
+  border-bottom: 1px solid rgba(248, 233, 161, 0.06);
+}
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Cells */
+.pp-table td {
+  padding: 16px 20px;
+  font-size: 14px;
+  color: var(--white);
+  vertical-align: middle;
+}
+
+/* Name cell */
+.pp-td-name {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.pp-row-accent {
+  width: 3px;
+  height: 36px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.pp-row-title {
+  font-family: 'Playfair Display', serif;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--white);
+  margin-bottom: 2px;
+}
+
+.pp-row-id {
+  font-size: 11px;
+  color: var(--yellow);
+  opacity: 0.45;
+  letter-spacing: 0.06em;
+}
+
+/* Badge */
+.pp-badge {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 4px 10px;
+  border-radius: 20px;
+  border: 1px solid;
+  white-space: nowrap;
+}
+
+/* Date */
+.pp-td-date {
+  font-size: 13px;
+  color: var(--white);
+  opacity: 0.7;
+}
+
+/* Progress */
+.pp-td-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 120px;
+}
+
+.pp-progress-bar {
+  flex: 1;
+  height: 4px;
+  background: rgba(255,255,255,0.07);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.pp-progress-fill {
+  height: 100%;
+  border-radius: 10px;
+  transition: width 0.6s ease;
+}
+
+.pp-progress-label {
+  font-size: 12px;
+  color: var(--yellow);
+  opacity: 0.6;
+  min-width: 28px;
+  text-align: right;
+}
+
+/* Empty */
+.pp-empty {
+  text-align: center;
+  padding: 60px 20px !important;
+  color: var(--yellow);
+  opacity: 0.4;
+  font-size: 14px;
+}
+
+/* States */
+.pp-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  min-height: 240px;
+  justify-content: center;
+  color: var(--yellow);
+  opacity: 0.5;
+  font-size: 14px;
+}
+
+.pp-state.error { color: var(--coral); opacity: 1; }
+
+.pp-spinner {
+  width: 34px;
+  height: 34px;
+  border: 3px solid rgba(248,233,161,0.12);
+  border-top-color: var(--yellow);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
