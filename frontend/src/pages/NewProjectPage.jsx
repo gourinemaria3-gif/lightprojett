@@ -15,26 +15,30 @@ export default function NewProjectPage({ onBack }) {
   const [step, setStep] = useState(1);
 
   // Étape 1 — infos projet
-  const [title, setTitle]             = useState("");
+  const [title,       setTitle]       = useState("");
   const [description, setDescription] = useState("");
-  const [startDate, setStartDate]     = useState("");
-  const [endDate, setEndDate]         = useState("");
-  const [workload, setWorkload]       = useState("");
-  const [managerId, setManagerId]     = useState("");
-  const [useAI, setUseAI]             = useState(false);
-  const [members, setMembers]         = useState([]);
+  const [startDate,   setStartDate]   = useState("");
+  const [endDate,     setEndDate]     = useState("");
+  const [workload,    setWorkload]     = useState("");
+  const [managerId,   setManagerId]   = useState("");
+  const [useAI,       setUseAI]       = useState(false);
+  const [members,     setMembers]     = useState([]);
+
+  // Erreurs temps réel étape 1
+  const [errors, setErrors] = useState({});
 
   // Étape 2 — tâches
-  const [tasks, setTasks]                 = useState([]);
+  const [tasks,         setTasks]         = useState([]);
+  const [taskErrors,    setTaskErrors]    = useState({});
   const [correctedDesc, setCorrectedDesc] = useState("");
-  const [aiLoading, setAiLoading]         = useState(false);
-  const [aiError, setAiError]             = useState(null);
+  const [aiLoading,     setAiLoading]     = useState(false);
+  const [aiError,       setAiError]       = useState(null);
   const [editingTaskId, setEditingTaskId] = useState(null);
 
   // Étape 3 — création
-  const [creating, setCreating]       = useState(false);
+  const [creating,    setCreating]    = useState(false);
   const [createError, setCreateError] = useState(null);
-  const [success, setSuccess]         = useState(false);
+  const [success,     setSuccess]     = useState(false);
 
   useEffect(() => {
     fetchMembers()
@@ -42,12 +46,77 @@ export default function NewProjectPage({ onBack }) {
       .catch(() => setMembers([]));
   }, []);
 
+  // ── Validation temps réel étape 1 ────────────────────────
+  function validateField(field, value, extra = {}) {
+    let error = "";
+    switch (field) {
+      case "title":
+        if (!value.trim()) error = "Le titre est obligatoire.";
+        else if (value.trim().length < 2) error = "Minimum 2 caractères.";
+        else if (value.trim().length > 200) error = "Maximum 200 caractères.";
+        break;
+      case "description":
+        if (!value.trim()) error = "La description est obligatoire.";
+        else if (value.trim().length < 5) error = "Minimum 5 caractères.";
+        break;
+      case "startDate":
+        if (value && extra.endDate && new Date(value) > new Date(extra.endDate))
+          error = "La date de début ne peut pas être après la date de fin.";
+        break;
+      case "endDate":
+        if (value && extra.startDate && new Date(extra.startDate) > new Date(value))
+          error = "La date de fin ne peut pas être avant la date de début.";
+        break;
+      case "workload":
+        if (value && (isNaN(Number(value)) || Number(value) < 0))
+          error = "Le workload doit être un nombre positif.";
+        break;
+      default:
+        break;
+    }
+    setErrors((prev) => ({ ...prev, [field]: error }));
+    return error;
+  }
+
+  // ── Validation temps réel tâches ─────────────────────────
+  function validateTaskField(taskId, field, value, extra = {}) {
+    let error = "";
+    switch (field) {
+      case "title":
+        if (!value.trim()) error = "Le titre est obligatoire.";
+        else if (value.trim().length > 255) error = "Maximum 255 caractères.";
+        break;
+      case "estimatedHours":
+        if (value && (isNaN(Number(value)) || Number(value) < 0))
+          error = "Doit être un nombre positif.";
+        break;
+      case "startDate":
+        if (value && extra.dueDate && new Date(value) > new Date(extra.dueDate))
+          error = "Début après la fin.";
+        break;
+      case "dueDate":
+        if (value && extra.startDate && new Date(extra.startDate) > new Date(value))
+          error = "Fin avant le début.";
+        break;
+      default:
+        break;
+    }
+    setTaskErrors((prev) => ({
+      ...prev,
+      [taskId]: { ...(prev[taskId] || {}), [field]: error },
+    }));
+    return error;
+  }
+
   // ── Étape 1 → 2 ──────────────────────────────────────────
   async function handleNext() {
-    if (!title.trim() || !description.trim()) {
-      alert("Veuillez remplir le titre et la description.");
-      return;
-    }
+    // Valider tous les champs avant de continuer
+    const e1 = validateField("title", title);
+    const e2 = validateField("description", description);
+    const e3 = validateField("startDate", startDate, { endDate });
+    const e4 = validateField("endDate", endDate, { startDate });
+    const e5 = validateField("workload", workload);
+    if (e1 || e2 || e3 || e4 || e5) return;
 
     if (useAI) {
       setAiLoading(true);
@@ -57,12 +126,12 @@ export default function NewProjectPage({ onBack }) {
         setCorrectedDesc(result.correctedDescription || description);
         setTasks(
           (result.tasks || []).map((t) => ({
-            id: Date.now() + Math.random(),
-            title:          t.title || "",
-            description:    t.description || "",
+            id:             Date.now() + Math.random(),
+            title:          t.title          || "",
+            description:    t.description    || "",
             estimatedHours: t.estimatedHours || "",
-            startDate:      startDate || "",
-            dueDate:        endDate   || "",
+            startDate:      startDate        || "",
+            dueDate:        endDate          || "",
           }))
         );
       } catch (err) {
@@ -80,13 +149,17 @@ export default function NewProjectPage({ onBack }) {
 
   // ── Gestion tâches ────────────────────────────────────────
   function updateTask(id, field, value) {
-    setTasks((prev) =>
-      prev.map((t) => (t.id === id ? { ...t, [field]: value } : t))
-    );
+    setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, [field]: value } : t)));
+    const task = tasks.find((t) => t.id === id);
+    if (field === "startDate") validateTaskField(id, field, value, { dueDate: task?.dueDate });
+    if (field === "dueDate")   validateTaskField(id, field, value, { startDate: task?.startDate });
+    if (field === "estimatedHours") validateTaskField(id, field, value);
+    if (field === "title")     validateTaskField(id, field, value);
   }
 
   function deleteTask(id) {
     setTasks((prev) => prev.filter((t) => t.id !== id));
+    setTaskErrors((prev) => { const n = { ...prev }; delete n[id]; return n; });
     if (editingTaskId === id) setEditingTaskId(null);
   }
 
@@ -96,18 +169,22 @@ export default function NewProjectPage({ onBack }) {
     setEditingTaskId(newTask.id);
   }
 
-  // ── Étape 2 → 3 ──────────────────────────────────────────
-  function handleGoToReview() {
-    setStep(3);
-  }
-
   // ── Création finale ───────────────────────────────────────
   async function handleCreate() {
     setCreating(true);
     setCreateError(null);
     try {
       const finalDesc = correctedDesc || description;
-      await createProject(title, finalDesc, tasks, managerId, endDate, workload);
+      const selectedManager = members.find((m) => String(m.id) === String(managerId));
+      await createProject(
+        title, finalDesc, tasks,
+        managerId       || null,
+        selectedManager?.name  || null,
+        selectedManager?.email || null,
+        startDate       || null,
+        endDate         || null,
+        workload        || null
+      );
       setSuccess(true);
     } catch (err) {
       setCreateError("Erreur : " + err.message);
@@ -116,7 +193,6 @@ export default function NewProjectPage({ onBack }) {
     }
   }
 
-  // Nom du manager sélectionné
   const selectedManager = members.find((m) => String(m.id) === String(managerId));
 
   // ── Succès ────────────────────────────────────────────────
@@ -138,7 +214,6 @@ export default function NewProjectPage({ onBack }) {
     );
   }
 
-  // ── Rendu ─────────────────────────────────────────────────
   return (
     <div className="new-project-page">
 
@@ -146,11 +221,7 @@ export default function NewProjectPage({ onBack }) {
       <div className="np-header">
         <button
           className="np-back-btn"
-          onClick={
-            step === 1 ? onBack :
-            step === 2 ? () => setStep(1) :
-            () => setStep(2)
-          }
+          onClick={step === 1 ? onBack : step === 2 ? () => setStep(1) : () => setStep(2)}
         >
           ← {step === 1 ? "Retour" : "Étape précédente"}
         </button>
@@ -164,7 +235,7 @@ export default function NewProjectPage({ onBack }) {
         </div>
       </div>
 
-      {/* Stepper visuel */}
+      {/* Stepper */}
       <div className="np-stepper">
         <div className={`np-step ${step >= 1 ? "active" : ""}`}>
           <div className="np-step-dot">{step > 1 ? "✓" : "1"}</div>
@@ -194,8 +265,10 @@ export default function NewProjectPage({ onBack }) {
                 type="text"
                 placeholder="Ex: Refonte du site web"
                 value={title}
-                onChange={(e) => setTitle(e.target.value)}
+                onChange={(e) => { setTitle(e.target.value); validateField("title", e.target.value); }}
+                className={errors.title ? "np-input-error" : ""}
               />
+              {errors.title && <span className="np-field-error">⚠ {errors.title}</span>}
             </div>
           </div>
 
@@ -205,8 +278,10 @@ export default function NewProjectPage({ onBack }) {
               <textarea
                 placeholder="Décrivez votre projet en quelques phrases..."
                 value={description}
-                onChange={(e) => setDescription(e.target.value)}
+                onChange={(e) => { setDescription(e.target.value); validateField("description", e.target.value); }}
+                className={errors.description ? "np-input-error" : ""}
               />
+              {errors.description && <span className="np-field-error">⚠ {errors.description}</span>}
             </div>
           </div>
 
@@ -225,11 +300,23 @@ export default function NewProjectPage({ onBack }) {
           <div className="np-form-grid" style={{ marginTop: 14 }}>
             <div className="np-field">
               <label>Date de début</label>
-              <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+              <input
+                type="date"
+                value={startDate}
+                onChange={(e) => { setStartDate(e.target.value); validateField("startDate", e.target.value, { endDate }); validateField("endDate", endDate, { startDate: e.target.value }); }}
+                className={errors.startDate ? "np-input-error" : ""}
+              />
+              {errors.startDate && <span className="np-field-error">⚠ {errors.startDate}</span>}
             </div>
             <div className="np-field">
               <label>Date de fin cible</label>
-              <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
+              <input
+                type="date"
+                value={endDate}
+                onChange={(e) => { setEndDate(e.target.value); validateField("endDate", e.target.value, { startDate }); validateField("startDate", startDate, { endDate: e.target.value }); }}
+                className={errors.endDate ? "np-input-error" : ""}
+              />
+              {errors.endDate && <span className="np-field-error">⚠ {errors.endDate}</span>}
             </div>
           </div>
 
@@ -240,8 +327,10 @@ export default function NewProjectPage({ onBack }) {
                 type="number"
                 placeholder="Ex: 120"
                 value={workload}
-                onChange={(e) => setWorkload(e.target.value)}
+                onChange={(e) => { setWorkload(e.target.value); validateField("workload", e.target.value); }}
+                className={errors.workload ? "np-input-error" : ""}
               />
+              {errors.workload && <span className="np-field-error">⚠ {errors.workload}</span>}
             </div>
           </div>
 
@@ -258,22 +347,11 @@ export default function NewProjectPage({ onBack }) {
           </div>
 
           {aiError && (
-            <p style={{ color: "var(--coral)", fontSize: 13, marginTop: 10 }}>
-              ⚠️ {aiError}
-            </p>
+            <p style={{ color: "var(--coral)", fontSize: 13, marginTop: 10 }}>⚠️ {aiError}</p>
           )}
 
-          <button
-            className="np-submit-btn"
-            onClick={handleNext}
-            disabled={aiLoading}
-            style={{ marginTop: 20 }}
-          >
-            {aiLoading ? (
-              <><span className="np-spinner" /> Analyse IA en cours...</>
-            ) : (
-              "Suivant →"
-            )}
+          <button className="np-submit-btn" onClick={handleNext} disabled={aiLoading} style={{ marginTop: 20 }}>
+            {aiLoading ? <><span className="np-spinner" /> Analyse IA en cours...</> : "Suivant →"}
           </button>
         </div>
       )}
@@ -295,31 +373,24 @@ export default function NewProjectPage({ onBack }) {
 
           <div className="np-tasks-list">
             {tasks.map((task, i) => (
-              <div
-                key={task.id}
-                className="np-task-item"
-                style={{ animationDelay: `${i * 60}ms` }}
-              >
+              <div key={task.id} className="np-task-item" style={{ animationDelay: `${i * 60}ms` }}>
                 <div className="np-task-top">
                   <input
                     type="text"
                     value={task.title}
                     placeholder="Titre de la tâche"
                     onChange={(e) => updateTask(task.id, "title", e.target.value)}
+                    className={taskErrors[task.id]?.title ? "np-input-error" : ""}
                   />
-                  <button
-                    className="np-task-edit-btn"
-                    onClick={() => setEditingTaskId(editingTaskId === task.id ? null : task.id)}
-                    title="Modifier"
-                  >
+                  <button className="np-task-edit-btn"
+                    onClick={() => setEditingTaskId(editingTaskId === task.id ? null : task.id)}>
                     {editingTaskId === task.id ? "▲" : "✏️"}
                   </button>
-                  <button
-                    className="np-task-delete"
-                    onClick={() => deleteTask(task.id)}
-                    title="Supprimer"
-                  >✕</button>
+                  <button className="np-task-delete" onClick={() => deleteTask(task.id)}>✕</button>
                 </div>
+                {taskErrors[task.id]?.title && (
+                  <span className="np-field-error">⚠ {taskErrors[task.id].title}</span>
+                )}
 
                 {editingTaskId === task.id && (
                   <div className="np-task-details">
@@ -333,24 +404,40 @@ export default function NewProjectPage({ onBack }) {
                       />
                     </div>
                     <div className="np-task-meta">
-                      <input
-                        type="number"
-                        value={task.estimatedHours}
-                        placeholder="Heures estimées"
-                        onChange={(e) => updateTask(task.id, "estimatedHours", e.target.value)}
-                      />
-                      <input
-                        type="date"
-                        value={task.startDate}
-                        onChange={(e) => updateTask(task.id, "startDate", e.target.value)}
-                        title="Date de début"
-                      />
-                      <input
-                        type="date"
-                        value={task.dueDate}
-                        onChange={(e) => updateTask(task.id, "dueDate", e.target.value)}
-                        title="Date de fin"
-                      />
+                      <div>
+                        <input
+                          type="number"
+                          value={task.estimatedHours}
+                          placeholder="Heures estimées"
+                          onChange={(e) => updateTask(task.id, "estimatedHours", e.target.value)}
+                          className={taskErrors[task.id]?.estimatedHours ? "np-input-error" : ""}
+                        />
+                        {taskErrors[task.id]?.estimatedHours && (
+                          <span className="np-field-error">⚠ {taskErrors[task.id].estimatedHours}</span>
+                        )}
+                      </div>
+                      <div>
+                        <input
+                          type="date"
+                          value={task.startDate}
+                          onChange={(e) => updateTask(task.id, "startDate", e.target.value)}
+                          className={taskErrors[task.id]?.startDate ? "np-input-error" : ""}
+                        />
+                        {taskErrors[task.id]?.startDate && (
+                          <span className="np-field-error">⚠ {taskErrors[task.id].startDate}</span>
+                        )}
+                      </div>
+                      <div>
+                        <input
+                          type="date"
+                          value={task.dueDate}
+                          onChange={(e) => updateTask(task.id, "dueDate", e.target.value)}
+                          className={taskErrors[task.id]?.dueDate ? "np-input-error" : ""}
+                        />
+                        {taskErrors[task.id]?.dueDate && (
+                          <span className="np-field-error">⚠ {taskErrors[task.id].dueDate}</span>
+                        )}
+                      </div>
                     </div>
                   </div>
                 )}
@@ -358,73 +445,44 @@ export default function NewProjectPage({ onBack }) {
             ))}
           </div>
 
-          <button className="np-add-task-btn" onClick={addTask}>
-            + Ajouter une tâche
-          </button>
+          <button className="np-add-task-btn" onClick={addTask}>+ Ajouter une tâche</button>
 
-          <button
-            className="np-submit-btn"
-            onClick={handleGoToReview}
-            style={{ marginTop: 20 }}
-          >
+          <button className="np-submit-btn" onClick={() => setStep(3)} style={{ marginTop: 20 }}>
             Suivant → Récapitulatif
           </button>
         </div>
       )}
 
-      {/* ═══ ÉTAPE 3 — RÉCAPITULATIF ═══ */}
+      {/* ═══ ÉTAPE 3 ═══ */}
       {step === 3 && (
         <div className="np-section np-review">
           <h2 className="np-section-title"><span>🔍</span> Récapitulatif du projet</h2>
 
-          {/* Bloc infos projet */}
           <div className="np-review-block">
             <div className="np-review-block-title">📋 Informations générales</div>
             <div className="np-review-grid">
-              <div className="np-review-item">
-                <span className="np-review-label">Titre</span>
-                <span className="np-review-value">{title || <em>Non renseigné</em>}</span>
-              </div>
-              <div className="np-review-item">
-                <span className="np-review-label">Chef de projet</span>
-                <span className="np-review-value">
-                  {selectedManager ? selectedManager.name : <em>Non assigné</em>}
-                </span>
-              </div>
-              <div className="np-review-item">
-                <span className="np-review-label">Date de début</span>
-                <span className="np-review-value">{startDate || <em>—</em>}</span>
-              </div>
-              <div className="np-review-item">
-                <span className="np-review-label">Date de fin cible</span>
-                <span className="np-review-value">{endDate || <em>—</em>}</span>
-              </div>
-              <div className="np-review-item">
-                <span className="np-review-label">Workload estimé</span>
-                <span className="np-review-value">
-                  {workload ? `${workload} heures` : <em>—</em>}
-                </span>
-              </div>
-              <div className="np-review-item">
-                <span className="np-review-label">Généré par IA</span>
-                <span className="np-review-value">{useAI ? "✅ Oui" : "Non"}</span>
-              </div>
+              {[
+                ["Titre",            title || "—"],
+                ["Chef de projet",   selectedManager?.name || "Non assigné"],
+                ["Date de début",    startDate || "—"],
+                ["Date de fin cible",endDate   || "—"],
+                ["Workload estimé",  workload ? `${workload} heures` : "—"],
+                ["Généré par IA",    useAI ? "✅ Oui" : "Non"],
+              ].map(([label, value]) => (
+                <div key={label} className="np-review-item">
+                  <span className="np-review-label">{label}</span>
+                  <span className="np-review-value">{value}</span>
+                </div>
+              ))}
             </div>
-
             <div style={{ marginTop: 14 }}>
               <span className="np-review-label">Description</span>
-              <div className="np-review-desc">
-                {correctedDesc || description || <em>Non renseignée</em>}
-              </div>
+              <div className="np-review-desc">{correctedDesc || description || "—"}</div>
             </div>
           </div>
 
-          {/* Bloc tâches */}
           <div className="np-review-block" style={{ marginTop: 16 }}>
-            <div className="np-review-block-title">
-              📝 Tâches ({tasks.length})
-            </div>
-
+            <div className="np-review-block-title">📝 Tâches ({tasks.length})</div>
             {tasks.length === 0 ? (
               <p className="np-review-empty">Aucune tâche définie.</p>
             ) : (
@@ -433,20 +491,14 @@ export default function NewProjectPage({ onBack }) {
                   <div key={task.id} className="np-review-task">
                     <div className="np-review-task-header">
                       <span className="np-review-task-num">{i + 1}</span>
-                      <span className="np-review-task-title">
-                        {task.title || <em>Sans titre</em>}
-                      </span>
+                      <span className="np-review-task-title">{task.title || <em>Sans titre</em>}</span>
                       {task.estimatedHours && (
-                        <span className="np-review-task-badge">
-                          ⏱ {task.estimatedHours}h
-                        </span>
+                        <span className="np-review-task-badge">⏱ {task.estimatedHours}h</span>
                       )}
                     </div>
                     {(task.description || task.startDate || task.dueDate) && (
                       <div className="np-review-task-body">
-                        {task.description && (
-                          <p className="np-review-task-desc">{task.description}</p>
-                        )}
+                        {task.description && <p className="np-review-task-desc">{task.description}</p>}
                         <div className="np-review-task-dates">
                           {task.startDate && <span>🗓 Début : {task.startDate}</span>}
                           {task.dueDate   && <span>🏁 Fin : {task.dueDate}</span>}
@@ -460,23 +512,15 @@ export default function NewProjectPage({ onBack }) {
           </div>
 
           {createError && (
-            <p style={{ color: "var(--coral)", fontSize: 13, marginTop: 12 }}>
-              ⚠️ {createError}
-            </p>
+            <p style={{ color: "var(--coral)", fontSize: 13, marginTop: 12 }}>⚠️ {createError}</p>
           )}
 
-          {/* Bouton validation finale */}
-          <button
-            className="np-submit-btn np-validate-btn"
-            onClick={handleCreate}
-            disabled={creating}
-            style={{ marginTop: 24 }}
-          >
-            {creating ? (
-              <><span className="np-spinner" /> Création en cours...</>
-            ) : (
-              <>✅ Valider et créer dans OpenProject</>
-            )}
+          <button className="np-submit-btn np-validate-btn" onClick={handleCreate}
+            disabled={creating} style={{ marginTop: 24 }}>
+            {creating
+              ? <><span className="np-spinner" /> Création en cours...</>
+              : <>✅ Valider et créer dans OpenProject</>
+            }
           </button>
         </div>
       )}

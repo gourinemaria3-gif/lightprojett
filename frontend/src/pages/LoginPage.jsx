@@ -2,9 +2,9 @@ import React, { useState } from "react";
 import "./LoginPage.css";
 
 export default function LoginPage({ onLogin }) {
-  const [token, setToken]   = useState("");
+  const [token,   setToken]   = useState("");
   const [loading, setLoading] = useState(false);
-  const [error, setError]   = useState(null);
+  const [error,   setError]   = useState(null);
 
   async function handleLogin() {
     if (!token.trim()) {
@@ -22,11 +22,11 @@ export default function LoginPage({ onLogin }) {
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || "Erreur de connexion.");
 
-      // Stocker JWT + user dans localStorage
+      // Stocker JWT + user (avec isAdmin) dans localStorage
       localStorage.setItem("jwt", data.jwt);
-      localStorage.setItem("user", JSON.stringify(data.user));
+      localStorage.setItem("user", JSON.stringify(data.user)); // data.user contient isAdmin
 
-      onLogin(data.user);
+      onLogin(data.user); // { id, name, email, isAdmin }
     } catch (err) {
       setError(err.message);
     } finally {
@@ -60,15 +60,9 @@ export default function LoginPage({ onLogin }) {
           💡 Trouvez votre token dans OpenProject → Mon compte → Tokens d'accès API
         </p>
 
-        {error && (
-          <p className="login-error">⚠️ {error}</p>
-        )}
+        {error && <p className="login-error">⚠️ {error}</p>}
 
-        <button
-          className="login-btn"
-          onClick={handleLogin}
-          disabled={loading}
-        >
+        <button className="login-btn" onClick={handleLogin} disabled={loading}>
           {loading ? (
             <><span className="login-spinner" /> Connexion en cours...</>
           ) : (

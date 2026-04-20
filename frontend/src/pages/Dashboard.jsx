@@ -2,18 +2,29 @@ import React, { useState, useEffect } from "react";
 import { fetchProjects } from "../services/api";
 import ProjectsPage   from "./ProjectsPage";
 import NewProjectPage from "./NewProjectPage";
-import MyTasksPage from "./MyTasksPage";
+import MyTasksPage    from "./MyTasksPage";
 import "./Dashboard.css";
 
-const NAV_ITEMS = [
-  { id: "home",      icon: "🏠", label: "Accueil" },
-  { id: "projects",  icon: "📁", label: "Mes projets" },
-  { id: "mytasks",   icon: "✅", label: "Mes tâches" },
-  { id: "new",       icon: "✨", label: "Nouveau projet" },
-  { id: "alerts",    icon: "🔔", label: "Alertes" },
-];
+// ── Nav selon rôle ─────────────────────────────────────────────
+function getNavItems(isAdmin) {
+  const base = [
+    { id: "home",     icon: "🏠", label: "Accueil" },
+    { id: "projects", icon: "📁", label: "Mes projets" },
+    { id: "mytasks",  icon: "✅", label: "Mes tâches" },
+    { id: "alerts",   icon: "🔔", label: "Alertes" },
+  ];
+  // "Nouveau projet" visible uniquement pour l'admin
+  if (isAdmin) {
+    base.splice(3, 0, { id: "new", icon: "✨", label: "Nouveau projet" });
+  }
+  return base;
+}
 
+// ── Sidebar ────────────────────────────────────────────────────
 function Sidebar({ activePage, onNavigate, user, onLogout }) {
+  const isAdmin  = user?.isAdmin === true;
+  const navItems = getNavItems(isAdmin);
+
   return (
     <aside className="sidebar">
       <div>
@@ -22,7 +33,7 @@ function Sidebar({ activePage, onNavigate, user, onLogout }) {
       </div>
 
       <nav className="sidebar-nav">
-        {NAV_ITEMS.map((item) => (
+        {navItems.map((item) => (
           <button
             key={item.id}
             className={`nav-item ${activePage === item.id ? "active" : ""}`}
@@ -34,14 +45,26 @@ function Sidebar({ activePage, onNavigate, user, onLogout }) {
         ))}
       </nav>
 
-      <button className="sidebar-new-btn" onClick={() => onNavigate("new")}>
-        + Nouveau projet
-      </button>
+      {/* Bouton "Nouveau projet" dans sidebar uniquement pour admin */}
+      {isAdmin && (
+        <button className="sidebar-new-btn" onClick={() => onNavigate("new")}>
+          + Nouveau projet
+        </button>
+      )}
 
-      {/* Profil utilisateur */}
       {user && (
         <div className="sidebar-user">
-          <div className="sidebar-user-name">👤 {user.name}</div>
+          <div className="sidebar-user-name">
+            👤 {user.name}
+            {isAdmin && (
+              <span style={{
+                marginLeft: 8, fontSize: 10, background: "rgba(248,233,161,0.15)",
+                color: "#F8E9A1", borderRadius: 4, padding: "1px 6px",
+              }}>
+                Admin
+              </span>
+            )}
+          </div>
           <div className="sidebar-user-email">{user.email}</div>
           <button className="sidebar-logout-btn" onClick={onLogout}>
             Déconnexion
@@ -53,7 +76,11 @@ function Sidebar({ activePage, onNavigate, user, onLogout }) {
     </aside>
   );
 }
-function HomePage({ onNavigate, projectCount }) {
+
+// ── Home Page ──────────────────────────────────────────────────
+function HomePage({ onNavigate, projectCount, user }) {
+  const isAdmin = user?.isAdmin === true;
+
   return (
     <div className="home-page">
       <div className="home-header">
@@ -62,7 +89,6 @@ function HomePage({ onNavigate, projectCount }) {
         <p className="home-sub">Gérez vos projets OpenProject avec l'aide de l'IA</p>
       </div>
 
-      {/* Stats */}
       <div className="stats-row">
         <div className="stat-card yellow" style={{ animationDelay: "0ms" }}>
           <div className="stat-value">{projectCount ?? "—"}</div>
@@ -78,26 +104,28 @@ function HomePage({ onNavigate, projectCount }) {
         </div>
       </div>
 
-      {/* Actions */}
       <h2 className="section-title">Que voulez-vous faire ?</h2>
       <div className="actions-grid">
-        <button
-          className="action-card primary"
-          onClick={() => onNavigate("new")}
-          style={{ animationDelay: "0ms" }}
-        >
-          <div className="action-icon">✨</div>
-          <div className="action-title">Nouveau projet</div>
-          <div className="action-desc">
-            Créez un projet avec l'aide de l'IA Gemini qui propose et structure vos tâches automatiquement.
-          </div>
-          <span className="action-arrow">→</span>
-        </button>
+        {/* Nouveau projet — admin uniquement */}
+        {isAdmin && (
+          <button
+            className="action-card primary"
+            onClick={() => onNavigate("new")}
+            style={{ animationDelay: "0ms" }}
+          >
+            <div className="action-icon">✨</div>
+            <div className="action-title">Nouveau projet</div>
+            <div className="action-desc">
+              Créez un projet avec l'aide de l'IA Gemini qui propose et structure vos tâches automatiquement.
+            </div>
+            <span className="action-arrow">→</span>
+          </button>
+        )}
 
         <button
           className="action-card secondary"
           onClick={() => onNavigate("projects")}
-          style={{ animationDelay: "80ms" }}
+          style={{ animationDelay: isAdmin ? "80ms" : "0ms" }}
         >
           <div className="action-icon">📁</div>
           <div className="action-title">Mes projets</div>
@@ -109,8 +137,21 @@ function HomePage({ onNavigate, projectCount }) {
 
         <button
           className="action-card tertiary"
+          onClick={() => onNavigate("mytasks")}
+          style={{ animationDelay: isAdmin ? "160ms" : "80ms" }}
+        >
+          <div className="action-icon">✅</div>
+          <div className="action-title">Mes tâches</div>
+          <div className="action-desc">
+            Consultez vos tâches assignées et mettez à jour leur statut.
+          </div>
+          <span className="action-arrow">→</span>
+        </button>
+
+        <button
+          className="action-card"
           onClick={() => onNavigate("alerts")}
-          style={{ animationDelay: "160ms" }}
+          style={{ animationDelay: isAdmin ? "240ms" : "160ms" }}
         >
           <div className="action-icon">🔔</div>
           <div className="action-title">Alertes</div>
@@ -124,9 +165,12 @@ function HomePage({ onNavigate, projectCount }) {
   );
 }
 
+// ── Dashboard principal ────────────────────────────────────────
 export default function Dashboard({ user, onLogout }) {
-  const [activePage, setActivePage]     = useState("home");
-  const [projectCount, setProjectCount] = useState(null);
+  const [activePage,    setActivePage]    = useState("home");
+  const [projectCount,  setProjectCount]  = useState(null);
+
+  const isAdmin = user?.isAdmin === true;
 
   useEffect(() => {
     fetchProjects()
@@ -139,17 +183,18 @@ export default function Dashboard({ user, onLogout }) {
       case "projects":
         return (
           <ProjectsPage
-            onNewProject={() => setActivePage("new")}
+            user={user}
+            onNewProject={() => isAdmin && setActivePage("new")}
           />
         );
       case "new":
-        return (
-          <NewProjectPage
-            onBack={() => setActivePage("home")}
-          />
-        );
-        case "mytasks":
-  return <MyTasksPage user={user} />;
+        // Protéger côté frontend aussi
+        if (!isAdmin) return null;
+        return <NewProjectPage onBack={() => setActivePage("home")} />;
+
+      case "mytasks":
+        return <MyTasksPage user={user} />;
+
       case "alerts":
         return (
           <div style={{ padding: "52px 40px", color: "var(--blue-light)", opacity: 0.5 }}>
@@ -164,6 +209,7 @@ export default function Dashboard({ user, onLogout }) {
           <HomePage
             onNavigate={setActivePage}
             projectCount={projectCount}
+            user={user}
           />
         );
     }
@@ -171,7 +217,12 @@ export default function Dashboard({ user, onLogout }) {
 
   return (
     <div className="dashboard">
-      <Sidebar activePage={activePage} onNavigate={setActivePage} />
+      <Sidebar
+        activePage={activePage}
+        onNavigate={setActivePage}
+        user={user}
+        onLogout={onLogout}
+      />
       <main className="main-content">
         {renderPage()}
       </main>
