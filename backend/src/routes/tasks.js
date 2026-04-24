@@ -1,9 +1,5 @@
 "use strict";
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  Route — /api/tasks
-// ══════════════════════════════════════════════════════════════════════════════
-
 const express = require("express");
 const router  = express.Router();
 const { getTasks, patchTask, createTask, deleteTask } = require("../services/openproject");
@@ -15,13 +11,26 @@ const {
   getMemberRole,
 } = require("../database/db");
 const { propagateBlockingFrom } = require("../services/dependencies");
+const { syncOneProject } = require("../services/syncProjectStats");
+const {
+  notifyTaskAssigned,
+  notifyTaskOverdue,
+} = require("../services/notificationEngine");
 
-// ──────────────────────────────────────────────────────────────────────────────
-//  HELPER local
-// ──────────────────────────────────────────────────────────────────────────────
 function getAccess(userId, projectId, isAdmin) {
   if (isAdmin) return { role: "admin" };
   return getMemberRole(userId, projectId);
+}
+
+// ── Vérifie si une tâche est en retard ────────────────────────────────────────
+function isOverdue(task) {
+  if (!task?.dueDate) return false;
+  const isClosed = task.isClosed === true ||
+    ["done", "closed", "finished", "resolved", "rejected",
+     "terminé", "terminée", "fermé", "fermée"]
+      .includes((task._links?.status?.title || "").toLowerCase());
+  if (isClosed) return false;
+  return new Date(task.dueDate) < new Date(new Date().toDateString());
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -79,6 +88,20 @@ router.post("/project/:projectId", async (req, res) => {
 
   try {
     const created = await createTask(projectId, req.body, opToken);
+
+    // ── Notif assignation si la tâche est créée avec un assignee ─────────────
+    const newAssigneeId = created._links?.assignee?.href
+      ? Number(created._links.assignee.href.split("/").pop())
+      : null;
+    if (newAssigneeId) {
+      notifyTaskAssigned({
+        assigneeId:  newAssigneeId,
+        taskTitle:   created.subject,
+        projectName: `Projet #${projectId}`,
+        taskId:      created.id,
+      }).catch((err) => console.error("[Notif] assignation création:", err.message));
+    }
+
     res.status(201).json(created);
   } catch (error) {
     console.error("Erreur création tâche:", error.response?.data || error.message);
@@ -91,9 +114,6 @@ router.post("/project/:projectId", async (req, res) => {
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  PATCH /api/tasks/:taskId
-//
-//  CORRECTION 1 : propagateBlockingFrom appelé avec 3 args (pas 4)
-//  CORRECTION 2 : propagation async non bloquante conservée
 // ══════════════════════════════════════════════════════════════════════════════
 router.patch("/:taskId", async (req, res) => {
   const callerId  = req.user.userId;
@@ -122,18 +142,56 @@ router.patch("/:taskId", async (req, res) => {
 
   try {
     const { projectId: _removed, ...patchData } = req.body;
+
+    // ── Récupère l'état de la tâche AVANT le patch ────────────────────────
+    const tasksBefore = await getTasks(projectId, opToken);
+    const taskBefore  = tasksBefore.find((t) => String(t.id) === String(req.params.taskId));
+    const oldAssigneeId = taskBefore?._links?.assignee?.href
+      ? Number(taskBefore._links.assignee.href.split("/").pop())
+      : null;
+
+    // ── Applique le patch ─────────────────────────────────────────────────
     const result = await patchTask(req.params.taskId, patchData, opToken);
 
-    // CORRECTION : propagateBlockingFrom prend 3 args (pas 4, sans "status")
+    // ── FIX 1 : Notif assignation si l'assignee a changé ──────────────────
+    if (patchData.assignee !== undefined) {
+      const newAssigneeId = result._links?.assignee?.href
+        ? Number(result._links.assignee.href.split("/").pop())
+        : null;
+
+      if (newAssigneeId && newAssigneeId !== oldAssigneeId) {
+        notifyTaskAssigned({
+          assigneeId:  newAssigneeId,
+          taskTitle:   result.subject,
+          projectName: `Projet #${projectId}`,
+          taskId:      req.params.taskId,
+        }).catch((err) => console.error("[Notif] assignation patch:", err.message));
+      }
+    }
+
+    // ── FIX 2 : Notif retard si la dueDate vient d'être définie (ou changée)
+    //    et que la nouvelle date est déjà dans le passé ─────────────────────
+    if (patchData.dueDate !== undefined) {
+      const assigneeId = result._links?.assignee?.href
+        ? Number(result._links.assignee.href.split("/").pop())
+        : null;
+
+      if (assigneeId && isOverdue(result)) {
+        notifyTaskOverdue({
+          opUserId:  assigneeId,
+          taskTitle: result.subject,
+          dueDate:   result.dueDate,
+          taskId:    req.params.taskId,
+        }).catch((err) => console.error("[Notif] retard patch dueDate:", err.message));
+      }
+    }
+
+    // ── Propagation blocage + sync stats si statut changé ────────────────
     if (patchData.status) {
-      propagateBlockingFrom(
-        req.params.taskId,
-        projectId,
-        opToken
-        // ← suppression du 4e argument "patchData.status" qui n'existe pas
-      ).catch((err) => {
-        console.error("Erreur propagation blocage:", err.message);
-      });
+      Promise.all([
+        propagateBlockingFrom(req.params.taskId, projectId, opToken),
+        syncOneProject(projectId, opToken),
+      ]).catch((err) => console.error("[Post-patch] propagation/stats:", err.message));
     }
 
     res.json(result);
@@ -211,7 +269,6 @@ router.post("/:taskId/timelogs", async (req, res) => {
 
   try {
     const id = addTimeLog(taskId, opUserId, { hoursWorked, loggedDate, note });
-    // CORRECTION : refreshActualCost ne prend qu'UN seul argument (opTaskId)
     refreshActualCost(taskId);
     res.status(201).json({ message: "Heures enregistrées.", id });
   } catch (err) {
@@ -255,7 +312,6 @@ router.delete("/:taskId/timelogs/:logId", async (req, res) => {
 
   try {
     deleteTimeLog(logId);
-    // CORRECTION : refreshActualCost ne prend qu'UN seul argument (opTaskId)
     refreshActualCost(taskId);
     res.status(204).send();
   } catch (err) {

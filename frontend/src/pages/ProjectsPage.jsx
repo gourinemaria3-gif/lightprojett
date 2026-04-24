@@ -5,6 +5,9 @@ import NewSubProjectPage  from "./NewSubProjectPage";
 import DeleteProjectModal from "../components/DeleteProjectModal";
 import "./ProjectsPage.css";
 
+// ──────────────────────────────────────────────────────────────
+//  Status OP → label + couleur
+// ──────────────────────────────────────────────────────────────
 const STATUS_MAP = {
   on_track:  { label: "En cours",  color: "#6dc87a" },
   off_track: { label: "En retard", color: "#F76C6C" },
@@ -17,6 +20,35 @@ function getStatus(project) {
   return STATUS_MAP[key] || { label: "Actif", color: "#F8E9A1" };
 }
 
+function getRiskConfig(score) {
+  if (score === null || score === undefined) return null;
+  if (score <= 30) return { color: "#6dc87a", bg: "rgba(109,200,122,0.12)", label: "Faible",  icon: "🟢" };
+  if (score <= 60) return { color: "#F8E9A1", bg: "rgba(248,233,161,0.12)", label: "Modéré",  icon: "🟡" };
+  return             { color: "#F76C6C", bg: "rgba(247,108,108,0.12)", label: "Élevé",   icon: "🔴" };
+}
+
+function RiskBadge({ score }) {
+  const cfg = getRiskConfig(score);
+  if (!cfg) return <span style={{ opacity: 0.3, fontSize: 12 }}>—</span>;
+  return (
+    <span style={{
+      display:      "inline-flex",
+      alignItems:   "center",
+      gap:          5,
+      background:   cfg.bg,
+      border:       `1px solid ${cfg.color}44`,
+      borderRadius: "20px",
+      padding:      "3px 10px",
+      fontSize:     11,
+      fontWeight:   700,
+      color:        cfg.color,
+      whiteSpace:   "nowrap",
+    }}>
+      {cfg.icon} {score} — {cfg.label}
+    </span>
+  );
+}
+
 export default function ProjectsPage({ user }) {
   const isAdmin = user?.isAdmin === true;
 
@@ -26,13 +58,12 @@ export default function ProjectsPage({ user }) {
   const [search,          setSearch]          = useState("");
   const [selectedProject, setSelected]        = useState(null);
   const [expandedParents, setExpandedParents] = useState(new Set());
-  const [creatingSubFor,  setCreatingSubFor]  = useState(null); // project object ou null
+  const [creatingSubFor,  setCreatingSubFor]  = useState(null);
 
   const [projectToDelete, setProjectToDelete] = useState(null);
   const [deletingProject, setDeletingProject] = useState(false);
   const [deleteError,     setDeleteError]     = useState(null);
 
-  // forceRefresh=true vide le cache avant de recharger
   const loadProjects = (forceRefresh = false) => {
     setLoading(true);
     setError(null);
@@ -45,7 +76,6 @@ export default function ProjectsPage({ user }) {
 
   useEffect(() => { loadProjects(); }, []);
 
-  // ── Hiérarchie parent / enfants ──────────────────────────────
   const parentProjects = projects.filter((p) => !p._links?.parent?.href);
   const childrenOf = (parentId) =>
     projects.filter((p) => (p._links?.parent?.href || "").endsWith(`/${parentId}`));
@@ -87,10 +117,22 @@ export default function ProjectsPage({ user }) {
     setProjectToDelete(project);
   }
 
+  // ✅ CORRECTION : au retour de ProjectDetailPage, forcer le rechargement
+  // des projets depuis le serveur (le cache a été invalidé par ProjectDetailPage
+  // après le sync des stats)
+  function handleBackFromDetail() {
+    setSelected(null);
+    loadProjects(true);
+  }
+
   // ── Rendu d'une ligne projet ─────────────────────────────────
   function renderProjectRow(project, isChild = false) {
-    const status     = getStatus(project);
-    const progress   = project.progress ?? 0;
+    const status       = getStatus(project);
+    const progress     = project.progress     ?? 0;
+    const riskScore    = project.riskScore    ?? null;
+    const lateTasks    = project.lateTasks    ?? 0;
+    const blockedTasks = project.blockedTasks ?? 0;
+
     const children   = childrenOf(project.id);
     const isExpanded = expandedParents.has(project.id);
     const canManage  = isAdmin || isManagerOf(project);
@@ -105,6 +147,10 @@ export default function ProjectsPage({ user }) {
           day: "2-digit", month: "short", year: "numeric",
         })
       : "—";
+
+    const progressColor = riskScore !== null
+      ? (riskScore > 60 ? "#F76C6C" : riskScore > 30 ? "#F8E9A1" : "#6dc87a")
+      : status.color;
 
     return (
       <React.Fragment key={project.id}>
@@ -124,46 +170,59 @@ export default function ProjectsPage({ user }) {
               </button>
             )}
             {isChild && <span className="pp-child-indent">↳</span>}
-            <div className="pp-row-accent" style={{ background: status.color }} />
+            <div className="pp-row-accent" style={{ background: progressColor }} />
             <div>
               <div className="pp-row-title">{project.name}</div>
-              <div className="pp-row-id">{project.identifier}</div>
+              <div className="pp-row-id">
+                {project.identifier}
+                {lateTasks > 0 && (
+                  <span className="pp-late-badge">⚠️ {lateTasks} retard{lateTasks > 1 ? "s" : ""}</span>
+                )}
+                {blockedTasks > 0 && (
+                  <span className="pp-blocked-badge">🔒 {blockedTasks} bloquée{blockedTasks > 1 ? "s" : ""}</span>
+                )}
+              </div>
             </div>
             {!isChild && canManage && (
               <button
                 className="pp-add-sub-btn"
                 title="Créer un sous-projet"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setCreatingSubFor(project); // ouvre NewSubProjectPage
-                }}
+                onClick={(e) => { e.stopPropagation(); setCreatingSubFor(project); }}
               >
                 + Sous-projet
               </button>
             )}
           </td>
+
           <td>
             <span className="pp-badge" style={{ color: status.color, borderColor: status.color }}>
               {status.label}
             </span>
           </td>
+
           <td className="pp-td-date">{startDate}</td>
           <td className="pp-td-date">{endDate}</td>
+
           <td className="pp-td-progress">
             <div className="pp-progress-bar">
-              <div className="pp-progress-fill" style={{ width: `${progress}%`, background: status.color }} />
+              <div
+                className="pp-progress-fill"
+                style={{ width: `${progress}%`, background: progressColor, transition: "width 0.6s ease" }}
+              />
             </div>
             <span className="pp-progress-label">{progress}%</span>
           </td>
+
+          <td className="pp-td-risk">
+            <RiskBadge score={riskScore} />
+          </td>
         </tr>
 
-        {/* Sous-projets (enfants) */}
         {!isChild && isExpanded && children.map((child) => renderProjectRow(child, true))}
       </React.Fragment>
     );
   }
 
-  // ── Écran création sous-projet ────────────────────────────────
   if (creatingSubFor) {
     return (
       <NewSubProjectPage
@@ -172,28 +231,25 @@ export default function ProjectsPage({ user }) {
         onBack={() => setCreatingSubFor(null)}
         onCreated={() => {
           setCreatingSubFor(null);
-          // Auto-expand le projet parent pour voir le sous-projet créé
           setExpandedParents((prev) => new Set([...prev, creatingSubFor.id]));
-          loadProjects(true); // force refresh sans cache
+          loadProjects(true);
         }}
       />
     );
   }
 
-  // ── Écran détail projet ───────────────────────────────────────
   if (selectedProject) {
     return (
       <ProjectDetailPage
         project={selectedProject}
         user={user}
-        onBack={() => setSelected(null)}
+        onBack={handleBackFromDetail} // ✅ CORRECTION : était () => setSelected(null)
         onProjectDeleted={isAdmin ? handleDeleteProjectRequest : null}
         onSubProjectCreated={() => loadProjects(true)}
       />
     );
   }
 
-  // ── Liste des projets ─────────────────────────────────────────
   return (
     <div className="pp-page">
 
@@ -253,12 +309,13 @@ export default function ProjectsPage({ user }) {
                 <th>Date début</th>
                 <th>Date fin</th>
                 <th>Progression</th>
+                <th>Risque</th>
               </tr>
             </thead>
             <tbody>
               {filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="pp-empty">
+                  <td colSpan={6} className="pp-empty">
                     Aucun projet trouvé{search ? ` pour "${search}"` : ""}.
                   </td>
                 </tr>

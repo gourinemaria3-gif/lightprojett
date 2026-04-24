@@ -37,21 +37,23 @@ function daysUntil(d) {
 const emptyTask       = () => ({ title: "", description: "", startDate: "", dueDate: "", estimatedHours: "" });
 const emptySubProject = () => ({ title: "", description: "" });
 
-// ═══════════════════════════════════════════════════════════════
-//  PANNEAU DÉPENDANCES (dans la ligne expandée d'une tâche)
-// ═══════════════════════════════════════════════════════════════
-// ─────────────────────────────────────────────────────────────
-//  REMPLACE uniquement le composant DependenciesPanel
-//  dans ton ProjectDetailPage.jsx
-//
-//  Colle ce composant AVANT le composant MembersSection,
-//  et assure-toi d'importer CustomSelect en haut du fichier :
-//
-//    import CustomSelect from "./CustomSelect";
-//
-//  (ou mets le code de CustomSelect directement dans le même fichier)
-// ─────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+//  syncProjectStats — appelle POST /api/projects/:id/sync
+//  Retourne les stats fraîches ou null en cas d'erreur (non bloquant)
+// ══════════════════════════════════════════════════════════════════════════════
+async function syncProjectStats(projectId) {
+  try {
+    const res = await fetch(`/api/projects/${projectId}/sync`, { method: "POST" });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
 
+// ═══════════════════════════════════════════════════════════════
+//  PANNEAU DÉPENDANCES
+// ═══════════════════════════════════════════════════════════════
 function DependenciesPanel({ task, projectId, allTasks, isManager }) {
   const [data,     setData]     = useState(null);
   const [loading,  setLoading]  = useState(true);
@@ -73,7 +75,6 @@ function DependenciesPanel({ task, projectId, allTasks, isManager }) {
 
   useEffect(() => { load(); }, [load]);
 
-  // Options pour le CustomSelect — exclut la tâche elle-même + déjà liées
   const alreadyLinked = new Set([
     task.id,
     ...(data?.dependsOn   || []).map((d) => d.taskId),
@@ -118,15 +119,11 @@ function DependenciesPanel({ task, projectId, allTasks, isManager }) {
 
   return (
     <div className="pdp-deps-panel">
-
-      {/* Bannière bloquée */}
       {data?.isBlocked && (
         <div className="pdp-deps-blocked-banner">
           🔒 Cette tâche est <strong>bloquée</strong> — une ou plusieurs dépendances ne sont pas terminées.
         </div>
       )}
-
-      {/* Cette tâche dépend de */}
       <div className="pdp-deps-col">
         <div className="pdp-deps-col-title">Cette tâche dépend de</div>
         {(data?.dependsOn || []).length === 0 ? (
@@ -143,7 +140,6 @@ function DependenciesPanel({ task, projectId, allTasks, isManager }) {
                     className="pdp-dep-remove"
                     onClick={() => handleRemove(dep.taskId)}
                     disabled={saving}
-                    title="Retirer cette dépendance"
                   >✕</button>
                 )}
               </div>
@@ -151,8 +147,6 @@ function DependenciesPanel({ task, projectId, allTasks, isManager }) {
           </div>
         )}
       </div>
-
-      {/* Cette tâche bloque */}
       <div className="pdp-deps-col">
         <div className="pdp-deps-col-title">Cette tâche bloque</div>
         {(data?.blockingFor || []).length === 0 ? (
@@ -168,13 +162,10 @@ function DependenciesPanel({ task, projectId, allTasks, isManager }) {
           </div>
         )}
       </div>
-
-      {/* Ajouter une dépendance — manager seulement */}
       {isManager && (
         <div className="pdp-deps-add">
           <div className="pdp-deps-col-title">Ajouter une dépendance</div>
           <div className="pdp-deps-add-row">
-            {/* ✅ CustomSelect remplace le <select> natif */}
             <CustomSelect
               value={addingId}
               onChange={setAddingId}
@@ -195,10 +186,7 @@ function DependenciesPanel({ task, projectId, allTasks, isManager }) {
           )}
         </div>
       )}
-
-      {error && (
-        <p className="pdp-form-error" style={{ marginTop: 8 }}>⚠️ {error}</p>
-      )}
+      {error && <p className="pdp-form-error" style={{ marginTop: 8 }}>⚠️ {error}</p>}
     </div>
   );
 }
@@ -259,9 +247,7 @@ function MembersSection({ project, allMembers, projectMembers, onRefresh }) {
           </button>
         )}
       </div>
-
       {error && <p className="pdp-form-error">⚠️ {error}</p>}
-
       {adding && (
         <div className="pdp-add-member-form">
           <select value={selectedUserId} onChange={(e) => setSelectedUserId(e.target.value)}>
@@ -278,7 +264,6 @@ function MembersSection({ project, allMembers, projectMembers, onRefresh }) {
           </button>
         </div>
       )}
-
       <div className="pdp-members-list">
         {projectMembers.length === 0 ? (
           <p className="pdp-members-empty">Aucun membre dans ce projet.</p>
@@ -306,12 +291,10 @@ function MembersSection({ project, allMembers, projectMembers, onRefresh }) {
 
 // ═══════════════════════════════════════════════════════════════
 //  VUE MEMBRE
-//  - Taux horaire déplacé PAR TÂCHE (dans le formulaire d'ajout d'heures)
-//  - Panel dépendances visible en lecture seule
 // ═══════════════════════════════════════════════════════════════
 function MemberView({ project, user, tasks, projectMembers, onRefresh }) {
   const [expandedTask, setExpandedTask] = useState(null);
-  const [expandedTab,  setExpandedTab]  = useState({}); // { [taskId]: "logs" | "deps" }
+  const [expandedTab,  setExpandedTab]  = useState({});
   const [taskLogs,     setTaskLogs]     = useState({});
   const [logForm,      setLogForm]      = useState({});
   const [savingLog,    setSavingLog]    = useState(null);
@@ -345,7 +328,6 @@ function MemberView({ project, user, tasks, projectMembers, onRefresh }) {
     }
   }
 
-  // Saisie heures avec taux horaire par tâche
   async function handleAddLog(taskId) {
     const form = logForm[taskId] || {};
     if (!form.hours) return;
@@ -356,7 +338,7 @@ function MemberView({ project, user, tasks, projectMembers, onRefresh }) {
         hoursWorked: Number(form.hours),
         loggedDate:  form.date || new Date().toISOString().slice(0, 10),
         note:        form.note || "",
-        hourlyRate:  form.hourlyRate ? Number(form.hourlyRate) : null, // taux par tâche
+        hourlyRate:  form.hourlyRate ? Number(form.hourlyRate) : null,
         projectId:   project.id,
       });
       const logs = await fetchTimeLogs(taskId, project.id);
@@ -456,7 +438,6 @@ function MemberView({ project, user, tasks, projectMembers, onRefresh }) {
                     {isExpanded && (
                       <tr className="pdp-expand-row">
                         <td colSpan={6}>
-                          {/* Tabs logs / dépendances */}
                           <div className="pdp-expand-tabs">
                             <button
                               className={`pdp-expand-tab ${activeTab === "logs" ? "active" : ""}`}
@@ -472,7 +453,6 @@ function MemberView({ project, user, tasks, projectMembers, onRefresh }) {
                             </button>
                           </div>
 
-                          {/* ── Heures + taux par tâche ── */}
                           {activeTab === "logs" && (
                             <div className="pdp-logs-section">
                               <div className="pdp-log-form">
@@ -482,7 +462,6 @@ function MemberView({ project, user, tasks, projectMembers, onRefresh }) {
                                 />
                                 <input
                                   type="number" placeholder="Taux (DA/h)" value={form.hourlyRate || ""}
-                                  title="Taux horaire pour cette tâche"
                                   onChange={(e) => setLogForm((p) => ({ ...p, [task.id]: { ...form, hourlyRate: e.target.value } }))}
                                 />
                                 <input
@@ -527,7 +506,6 @@ function MemberView({ project, user, tasks, projectMembers, onRefresh }) {
                             </div>
                           )}
 
-                          {/* ── Dépendances (lecture seule pour membre) ── */}
                           {activeTab === "deps" && (
                             <DependenciesPanel
                               task={task}
@@ -551,7 +529,70 @@ function MemberView({ project, user, tasks, projectMembers, onRefresh }) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  VUE ADMIN / CHEF DE PROJET
+//  Helpers risque
+// ═══════════════════════════════════════════════════════════════
+function getRiskColor(score) {
+  if (score === null || score === undefined) return "#A8D0E6";
+  if (score <= 30) return "#6dc87a";
+  if (score <= 60) return "#F8E9A1";
+  return "#F76C6C";
+}
+
+function getRiskLabel(score) {
+  if (score === null || score === undefined) return "—";
+  if (score <= 30) return "Faible";
+  if (score <= 60) return "Modéré";
+  return "Élevé";
+}
+
+function RiskGauge({ score, explanation }) {
+  const color = getRiskColor(score);
+  const label = getRiskLabel(score);
+  const safeScore = score ?? 0;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{
+          flex: 1, height: 8, borderRadius: "10px",
+          background: "rgba(255,255,255,0.07)", overflow: "hidden",
+        }}>
+          <div style={{
+            width: `${safeScore}%`, height: "100%", background: color,
+            borderRadius: "10px", transition: "width 0.8s ease",
+          }} />
+        </div>
+        <span style={{ fontSize: 13, fontWeight: 700, color, minWidth: 30, textAlign: "right" }}>
+          {safeScore}
+        </span>
+        <span style={{
+          fontSize: 11, fontWeight: 700, padding: "2px 9px",
+          borderRadius: "20px", background: color + "18",
+          border: `1px solid ${color}44`, color,
+        }}>
+          {label}
+        </span>
+      </div>
+      {explanation && explanation !== "projet dans les temps, aucun signal d'alerte" ? (
+        <div style={{
+          fontSize: 12, color: "rgba(255,255,255,0.4)", lineHeight: 1.6,
+          fontStyle: "italic", padding: "8px 10px",
+          background: "rgba(255,255,255,0.03)", borderRadius: "7px",
+          border: "1px solid rgba(255,255,255,0.06)",
+        }}>
+          {explanation}
+        </div>
+      ) : (
+        <div style={{ fontSize: 12, color: "#6dc87a", opacity: 0.7 }}>
+          ✅ Projet dans les temps, aucun signal d'alerte.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  VUE MANAGER
 // ═══════════════════════════════════════════════════════════════
 function ManagerView({ project, user, tasks, allMembers, projectMembers, onRefresh, onSubProjectCreated }) {
   const [showNewTask,     setShowNewTask]     = useState(false);
@@ -561,7 +602,7 @@ function ManagerView({ project, user, tasks, allMembers, projectMembers, onRefre
   const [editingTask,     setEditingTask]     = useState(null);
   const [taskSearch,      setTaskSearch]      = useState("");
   const [expandedTask,    setExpandedTask]    = useState(null);
-  const [expandedTab,     setExpandedTab]     = useState({}); // { [taskId]: "logs"|"deps" }
+  const [expandedTab,     setExpandedTab]     = useState({});
   const [taskLogs,        setTaskLogs]        = useState({});
   const [logForm,         setLogForm]         = useState({});
   const [savingLog,       setSavingLog]       = useState(null);
@@ -573,12 +614,19 @@ function ManagerView({ project, user, tasks, allMembers, projectMembers, onRefre
   const [creatingSub,    setCreatingSub]    = useState(false);
   const [createSubError, setCreateSubError] = useState(null);
 
-  const daysLeft  = daysUntil(project.endDate);
+  const daysLeft = daysUntil(project.endDate);
+
+  const progress          = project.progress          ?? 0;
+  const riskScore         = project.riskScore         ?? 0;
+  const lateTasks         = project.lateTasks         ?? 0;
+  const blockedTasks      = project.blockedTasks      ?? 0;
+  const aiSummary         = project.aiSummary         ?? null;
+  const estimatesComplete = project.estimatesComplete !== false;
+  const missingEstimates  = project.missingEstimates  ?? 0;
+  const riskIsPartial     = project.riskIsPartial     ?? false;
+
   const doneTasks = tasks.filter((t) => getTaskStatus(t).done).length;
-  const progress  = tasks.length > 0 ? Math.round((doneTasks / tasks.length) * 100) : 0;
-  const lateTasks = tasks.filter(
-    (t) => t.dueDate && new Date(t.dueDate) < new Date() && !getTaskStatus(t).done
-  ).length;
+
   const filtered = tasks.filter((t) =>
     t.subject?.toLowerCase().includes(taskSearch.toLowerCase())
   );
@@ -606,10 +654,7 @@ function ManagerView({ project, user, tasks, allMembers, projectMembers, onRefre
     setCreateSubError(null);
     try {
       const { createSubProject } = await import("../services/api");
-      await createSubProject(project.id, {
-        title:       newSub.title.trim(),
-        description: newSub.description.trim(),
-      });
+      await createSubProject(project.id, { title: newSub.title.trim(), description: newSub.description.trim() });
       setNewSub(emptySubProject());
       setShowNewSub(false);
       if (onSubProjectCreated) onSubProjectCreated();
@@ -624,6 +669,7 @@ function ManagerView({ project, user, tasks, allMembers, projectMembers, onRefre
     setUpdatingTask(task.id);
     try {
       await patchTask(task.id, task.lockVersion, fields, project.id);
+      await new Promise((r) => setTimeout(r, 500));
       await onRefresh();
       setEditingTask(null);
     } catch (err) {
@@ -647,7 +693,6 @@ function ManagerView({ project, user, tasks, allMembers, projectMembers, onRefre
     }
   }
 
-  // Saisie heures avec taux par tâche
   async function handleAddLog(taskId) {
     const form = logForm[taskId] || {};
     if (!form.opUserId || !form.hours) return;
@@ -682,19 +727,24 @@ function ManagerView({ project, user, tasks, allMembers, projectMembers, onRefre
     }
   }
 
+  const riskColor = getRiskColor(riskScore);
+
   return (
     <div className="pdp-manager-view">
 
-      {/* ── Infos projet ── */}
+      {/* ══ CARDS INFOS PROJET ══ */}
       <div className="pdp-project-info-grid">
+
         <div className="pdp-info-card">
           <div className="pdp-info-card-label">Description</div>
           <div className="pdp-info-card-value desc">{project.description?.raw || "—"}</div>
         </div>
+
         <div className="pdp-info-card">
           <div className="pdp-info-card-label">Date de début</div>
           <div className="pdp-info-card-value">{formatDate(project.startDate || project.createdAt)}</div>
         </div>
+
         <div className="pdp-info-card">
           <div className="pdp-info-card-label">Date de fin</div>
           <div className="pdp-info-card-value"
@@ -707,29 +757,62 @@ function ManagerView({ project, user, tasks, allMembers, projectMembers, onRefre
             )}
           </div>
         </div>
+
         <div className="pdp-info-card">
           <div className="pdp-info-card-label">Workload estimé</div>
           <div className="pdp-info-card-value">{project.workload ? `${project.workload}h` : "—"}</div>
         </div>
+
         <div className="pdp-info-card">
-          <div className="pdp-info-card-label">Progression</div>
+          <div className="pdp-info-card-label">
+            Progression
+            <span style={{ opacity: 0.4, fontSize: 12, marginLeft: 6, fontStyle: "italic" }}>
+              {estimatesComplete
+                ? "(pondérée par heures estimées)"
+                : `(simplifiée — ${missingEstimates} tâche${missingEstimates > 1 ? "s" : ""} sans estimation)`}
+            </span>
+          </div>
           <div className="pdp-info-card-value">
             <div className="pdp-mini-progress">
-              <div className="pdp-mini-progress-fill" style={{ width: `${progress}%` }} />
+              <div className="pdp-mini-progress-fill"
+                style={{ width: `${progress}%`, background: riskColor }} />
             </div>
-            <span>{progress}% — {doneTasks}/{tasks.length} tâches</span>
+            <span style={{ color: riskColor }}>{progress}%</span>
+            <span style={{ opacity: 0.4, fontSize: 12, marginLeft: 6 }}>
+              — {doneTasks}/{tasks.length} tâches terminées
+            </span>
           </div>
         </div>
+
         <div className="pdp-info-card">
-          <div className="pdp-info-card-label">En retard</div>
-          <div className="pdp-info-card-value"
-            style={lateTasks > 0 ? { color: "#F76C6C" } : { color: "#6dc87a" }}>
-            {lateTasks > 0 ? `⚠️ ${lateTasks} tâche${lateTasks > 1 ? "s" : ""}` : "✅ Aucun retard"}
+          <div className="pdp-info-card-label">Alertes</div>
+          <div className="pdp-info-card-value" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <span style={{ color: lateTasks > 0 ? "#F76C6C" : "#6dc87a", fontSize: 13 }}>
+              {lateTasks > 0 ? `⚠️ ${lateTasks} tâche${lateTasks > 1 ? "s" : ""} en retard` : "✅ Aucun retard"}
+            </span>
+            <span style={{ color: blockedTasks > 0 ? "#F8E9A1" : "#6dc87a", fontSize: 13 }}>
+              {blockedTasks > 0 ? `🔒 ${blockedTasks} tâche${blockedTasks > 1 ? "s" : ""} bloquée${blockedTasks > 1 ? "s" : ""}` : "✅ Aucun blocage"}
+            </span>
           </div>
         </div>
+
+        <div className="pdp-info-card" style={{ gridColumn: "1 / -1" }}>
+          <div className="pdp-info-card-label">
+            Score de risque
+            <span style={{ fontSize: 10, opacity: 0.4, marginLeft: 6, fontStyle: "italic" }}>
+              {riskIsPartial
+                ? "(score partiel — aucune date disponible, max 70/100)"
+                : "(retard 40pts + blocage 30pts + progression 30pts)"}
+            </span>
+          </div>
+          <div className="pdp-info-card-value" style={{ marginTop: 4 }}>
+            <RiskGauge score={riskScore} explanation={aiSummary} />
+          </div>
+        </div>
+
       </div>
 
-      {/* ── Tabs ── */}
+      {/* ══ TABS ══ */}
       <div className="pdp-section-tabs">
         <button
           className={`pdp-section-tab ${activeSection === "tasks" ? "active" : ""}`}
@@ -770,7 +853,6 @@ function ManagerView({ project, user, tasks, allMembers, projectMembers, onRefre
               {showNewSub ? "Annuler" : "+ Nouveau sous-projet"}
             </button>
           </div>
-
           {showNewSub && (
             <div className="pdp-new-task-form">
               <div className="pdp-ntf-grid">
@@ -799,7 +881,6 @@ function ManagerView({ project, user, tasks, allMembers, projectMembers, onRefre
               </div>
             </div>
           )}
-
           <p className="pdp-subprojects-hint">
             Les sous-projets créés apparaissent dans la liste "Mes Projets" sous ce projet parent.
           </p>
@@ -903,21 +984,15 @@ function ManagerView({ project, user, tasks, allMembers, projectMembers, onRefre
                           onClick={() => !isEditing && handleExpandTask(task.id)}
                           style={{ cursor: "pointer" }}
                         >
-                          <td>
-                            <span className="pdp-task-dot"
-                              style={{ background: isLate ? "#F76C6C" : status.color }} />
-                          </td>
-                          <td>
-                            <div className="pdp-task-title-cell">{task.subject}</div>
-                          </td>
+                          <td><span className="pdp-task-dot" style={{ background: isLate ? "#F76C6C" : status.color }} /></td>
+                          <td><div className="pdp-task-title-cell">{task.subject}</div></td>
                           <td>
                             {assignee
                               ? <span className="pdp-assignee-pill">👤 {assignee.name}</span>
                               : <span style={{ opacity: 0.3, fontSize: 12 }}>Non assigné</span>}
                           </td>
                           <td>
-                            <span className="pdp-status-pill"
-                              style={{ color: status.color, borderColor: status.color + "55" }}>
+                            <span className="pdp-status-pill" style={{ color: status.color, borderColor: status.color + "55" }}>
                               {status.label}
                             </span>
                           </td>
@@ -925,31 +1000,23 @@ function ManagerView({ project, user, tasks, allMembers, projectMembers, onRefre
                             {isLate ? "⚠️ " : ""}{formatDate(task.dueDate)}
                           </td>
                           <td style={{ opacity: 0.7 }}>
-                            {task.estimatedTime
-                              ? task.estimatedTime.replace("PT", "").replace("H", "h")
-                              : "—"}
+                            {task.estimatedTime ? task.estimatedTime.replace("PT", "").replace("H", "h") : "—"}
                           </td>
                           <td onClick={(e) => e.stopPropagation()}>
-                            <button
-                              className="pdp-edit-task-btn"
+                            <button className="pdp-edit-task-btn"
                               onClick={() => setEditingTask(isEditing ? null : {
-                                id:             task.id,
-                                subject:        task.subject,
-                                startDate:      task.startDate  || "",
-                                dueDate:        task.dueDate    || "",
+                                id: task.id, subject: task.subject,
+                                startDate: task.startDate || "", dueDate: task.dueDate || "",
                                 estimatedHours: task.estimatedTime
-                                  ? parseFloat(task.estimatedTime.replace("PT", "").replace("H", ""))
-                                  : "",
+                                  ? parseFloat(task.estimatedTime.replace("PT","").replace("H","")) : "",
                                 assigneeId: assigneeId || "",
-                                status:     task._links?.status?.title || "",
-                              })}
-                            >
+                                status: task._links?.status?.title || "",
+                              })}>
                               {isEditing ? "✕" : "✏️"}
                             </button>
                           </td>
                         </tr>
 
-                        {/* ── Formulaire d'édition ── */}
                         {isEditing && (
                           <tr className="pdp-edit-row">
                             <td colSpan={7}>
@@ -958,14 +1025,12 @@ function ManagerView({ project, user, tasks, allMembers, projectMembers, onRefre
                                   <div className="pdp-ntf-field full">
                                     <label>Titre</label>
                                     <input type="text" value={editingTask.subject}
-                                      onChange={(e) =>
-                                        setEditingTask({ ...editingTask, subject: e.target.value })} />
+                                      onChange={(e) => setEditingTask({ ...editingTask, subject: e.target.value })} />
                                   </div>
                                   <div className="pdp-ntf-field">
                                     <label>Statut</label>
                                     <select value={editingTask.status}
-                                      onChange={(e) =>
-                                        setEditingTask({ ...editingTask, status: e.target.value })}>
+                                      onChange={(e) => setEditingTask({ ...editingTask, status: e.target.value })}>
                                       <option value="New">À faire</option>
                                       <option value="In Progress">En cours</option>
                                       <option value="Closed">Terminée</option>
@@ -974,8 +1039,7 @@ function ManagerView({ project, user, tasks, allMembers, projectMembers, onRefre
                                   <div className="pdp-ntf-field">
                                     <label>Responsable</label>
                                     <select value={editingTask.assigneeId}
-                                      onChange={(e) =>
-                                        setEditingTask({ ...editingTask, assigneeId: e.target.value })}>
+                                      onChange={(e) => setEditingTask({ ...editingTask, assigneeId: e.target.value })}>
                                       <option value="">— Non assigné —</option>
                                       {projectMembers.map((m) => (
                                         <option key={m.op_user_id} value={m.op_user_id}>{m.name}</option>
@@ -985,40 +1049,29 @@ function ManagerView({ project, user, tasks, allMembers, projectMembers, onRefre
                                   <div className="pdp-ntf-field">
                                     <label>Date de début</label>
                                     <input type="date" value={editingTask.startDate}
-                                      onChange={(e) =>
-                                        setEditingTask({ ...editingTask, startDate: e.target.value })} />
+                                      onChange={(e) => setEditingTask({ ...editingTask, startDate: e.target.value })} />
                                   </div>
                                   <div className="pdp-ntf-field">
                                     <label>Date de fin</label>
                                     <input type="date" value={editingTask.dueDate}
-                                      onChange={(e) =>
-                                        setEditingTask({ ...editingTask, dueDate: e.target.value })} />
+                                      onChange={(e) => setEditingTask({ ...editingTask, dueDate: e.target.value })} />
                                   </div>
                                   <div className="pdp-ntf-field">
                                     <label>Heures estimées</label>
                                     <input type="number" value={editingTask.estimatedHours}
-                                      onChange={(e) =>
-                                        setEditingTask({ ...editingTask, estimatedHours: e.target.value })} />
+                                      onChange={(e) => setEditingTask({ ...editingTask, estimatedHours: e.target.value })} />
                                   </div>
                                 </div>
                                 <div className="pdp-ntf-actions">
-                                  <button className="pdp-ntf-cancel" onClick={() => setEditingTask(null)}>
-                                    Annuler
-                                  </button>
-                                  <button
-                                    className="pdp-ntf-submit"
-                                    disabled={updatingTask === task.id}
+                                  <button className="pdp-ntf-cancel" onClick={() => setEditingTask(null)}>Annuler</button>
+                                  <button className="pdp-ntf-submit" disabled={updatingTask === task.id}
                                     onClick={() => handlePatchTask(task, {
-                                      subject:        editingTask.subject,
-                                      status:         editingTask.status,
-                                      startDate:      editingTask.startDate || null,
-                                      dueDate:        editingTask.dueDate   || null,
+                                      subject: editingTask.subject, status: editingTask.status,
+                                      startDate: editingTask.startDate || null, dueDate: editingTask.dueDate || null,
                                       estimatedHours: editingTask.estimatedHours || null,
-                                      assignee:       editingTask.assigneeId
-                                        ? { href: `/api/v3/users/${editingTask.assigneeId}` }
-                                        : null,
-                                    })}
-                                  >
+                                      assignee: editingTask.assigneeId
+                                        ? { href: `/api/v3/users/${editingTask.assigneeId}` } : null,
+                                    })}>
                                     {updatingTask === task.id ? "Sauvegarde..." : "✅ Enregistrer"}
                                   </button>
                                 </div>
@@ -1027,81 +1080,46 @@ function ManagerView({ project, user, tasks, allMembers, projectMembers, onRefre
                           </tr>
                         )}
 
-                        {/* ── Zone expandée : Heures + Dépendances ── */}
                         {isExpanded && !isEditing && (
                           <tr className="pdp-expand-row">
                             <td colSpan={7}>
-                              {/* Tabs */}
                               <div className="pdp-expand-tabs">
-                                <button
-                                  className={`pdp-expand-tab ${activeTab === "logs" ? "active" : ""}`}
-                                  onClick={() => setExpandedTab((p) => ({ ...p, [task.id]: "logs" }))}
-                                >
+                                <button className={`pdp-expand-tab ${activeTab === "logs" ? "active" : ""}`}
+                                  onClick={() => setExpandedTab((p) => ({ ...p, [task.id]: "logs" }))}>
                                   ⏱ Heures travaillées
                                 </button>
-                                <button
-                                  className={`pdp-expand-tab ${activeTab === "deps" ? "active" : ""}`}
-                                  onClick={() => setExpandedTab((p) => ({ ...p, [task.id]: "deps" }))}
-                                >
+                                <button className={`pdp-expand-tab ${activeTab === "deps" ? "active" : ""}`}
+                                  onClick={() => setExpandedTab((p) => ({ ...p, [task.id]: "deps" }))}>
                                   🔗 Dépendances
                                 </button>
                               </div>
 
-                              {/* ── Heures + taux par tâche ── */}
                               {activeTab === "logs" && (
                                 <div className="pdp-logs-section">
                                   <div className="pdp-log-form">
-                                    <select
-                                      value={form.opUserId || ""}
-                                      onChange={(e) =>
-                                        setLogForm((p) => ({ ...p, [task.id]: { ...form, opUserId: e.target.value } }))}
-                                    >
+                                    <select value={form.opUserId || ""}
+                                      onChange={(e) => setLogForm((p) => ({ ...p, [task.id]: { ...form, opUserId: e.target.value } }))}>
                                       <option value="">— Membre —</option>
                                       {projectMembers.map((m) => (
                                         <option key={m.op_user_id} value={m.op_user_id}>{m.name}</option>
                                       ))}
                                     </select>
-                                    <input
-                                      type="number" placeholder="Heures" value={form.hours || ""}
-                                      onChange={(e) =>
-                                        setLogForm((p) => ({ ...p, [task.id]: { ...form, hours: e.target.value } }))}
-                                    />
-                                    <input
-                                      type="number" placeholder="Taux DA/h" value={form.hourlyRate || ""}
-                                      title="Taux horaire pour cette tâche"
-                                      onChange={(e) =>
-                                        setLogForm((p) => ({ ...p, [task.id]: { ...form, hourlyRate: e.target.value } }))}
-                                    />
-                                    <input
-                                      type="date"
-                                      value={form.date || new Date().toISOString().slice(0, 10)}
-                                      onChange={(e) =>
-                                        setLogForm((p) => ({ ...p, [task.id]: { ...form, date: e.target.value } }))}
-                                    />
-                                    <input
-                                      type="text" placeholder="Note (optionnel)" value={form.note || ""}
-                                      onChange={(e) =>
-                                        setLogForm((p) => ({ ...p, [task.id]: { ...form, note: e.target.value } }))}
-                                    />
-                                    <button
-                                      onClick={() => handleAddLog(task.id)}
-                                      disabled={savingLog === task.id}
-                                    >
+                                    <input type="number" placeholder="Heures" value={form.hours || ""}
+                                      onChange={(e) => setLogForm((p) => ({ ...p, [task.id]: { ...form, hours: e.target.value } }))} />
+                                    <input type="number" placeholder="Taux DA/h" value={form.hourlyRate || ""}
+                                      onChange={(e) => setLogForm((p) => ({ ...p, [task.id]: { ...form, hourlyRate: e.target.value } }))} />
+                                    <input type="date" value={form.date || new Date().toISOString().slice(0, 10)}
+                                      onChange={(e) => setLogForm((p) => ({ ...p, [task.id]: { ...form, date: e.target.value } }))} />
+                                    <input type="text" placeholder="Note (optionnel)" value={form.note || ""}
+                                      onChange={(e) => setLogForm((p) => ({ ...p, [task.id]: { ...form, note: e.target.value } }))} />
+                                    <button onClick={() => handleAddLog(task.id)} disabled={savingLog === task.id}>
                                       {savingLog === task.id ? "..." : "+ Ajouter"}
                                     </button>
                                   </div>
                                   {logs.length > 0 ? (
                                     <table className="pdp-logs-table">
                                       <thead>
-                                        <tr>
-                                          <th>Membre</th>
-                                          <th>Heures</th>
-                                          <th>Taux</th>
-                                          <th>Coût</th>
-                                          <th>Date</th>
-                                          <th>Note</th>
-                                          <th />
-                                        </tr>
+                                        <tr><th>Membre</th><th>Heures</th><th>Taux</th><th>Coût</th><th>Date</th><th>Note</th><th /></tr>
                                       </thead>
                                       <tbody>
                                         {logs.map((log) => (
@@ -1109,19 +1127,10 @@ function ManagerView({ project, user, tasks, allMembers, projectMembers, onRefre
                                             <td>{log.name}</td>
                                             <td>{log.hours_worked}h</td>
                                             <td>{log.hourly_rate ? `${log.hourly_rate} DA/h` : "—"}</td>
-                                            <td>
-                                              {log.hourly_rate
-                                                ? `${(log.hours_worked * log.hourly_rate).toLocaleString("fr-FR")} DA`
-                                                : "—"}
-                                            </td>
+                                            <td>{log.hourly_rate ? `${(log.hours_worked * log.hourly_rate).toLocaleString("fr-FR")} DA` : "—"}</td>
                                             <td>{formatDate(log.logged_date)}</td>
                                             <td style={{ opacity: 0.5 }}>{log.note || "—"}</td>
-                                            <td>
-                                              <button
-                                                className="pdp-log-del"
-                                                onClick={() => handleDeleteLog(task.id, log.id)}
-                                              >✕</button>
-                                            </td>
+                                            <td><button className="pdp-log-del" onClick={() => handleDeleteLog(task.id, log.id)}>✕</button></td>
                                           </tr>
                                         ))}
                                       </tbody>
@@ -1132,7 +1141,6 @@ function ManagerView({ project, user, tasks, allMembers, projectMembers, onRefre
                                 </div>
                               )}
 
-                              {/* ── Dépendances ── */}
                               {activeTab === "deps" && (
                                 <DependenciesPanel
                                   task={task}
@@ -1158,13 +1166,20 @@ function ManagerView({ project, user, tasks, allMembers, projectMembers, onRefre
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  MAIN
+//  MAIN — ProjectDetailPage
+//
+//  FIX : au montage, on appelle POST /api/projects/:id/sync pour forcer
+//  le recalcul des stats en DB, puis on met à jour le projet local avec
+//  les valeurs fraîches (riskScore, lateTasks, blockedTasks, progress…)
 // ═══════════════════════════════════════════════════════════════
 export default function ProjectDetailPage({
-  project, user, onBack, onProjectDeleted, onSubProjectCreated,
+  project: projectProp, user, onBack, onProjectDeleted, onSubProjectCreated,
 }) {
   const isAdmin = user?.isAdmin === true;
 
+  // ✅ FIX : état local du projet pour pouvoir mettre à jour les stats
+  //    sans recharger toute la liste parente
+  const [project,        setProject]       = useState(projectProp);
   const [tasks,          setTasks]         = useState([]);
   const [allMembers,     setAllMembers]     = useState([]);
   const [projectMembers, setProjectMembers] = useState([]);
@@ -1178,14 +1193,35 @@ export default function ProjectDetailPage({
     setLoading(true);
     setError(null);
     try {
-      const [taskData, memberData, projectMemberData] = await Promise.all([
-        fetchTasks(project.id),
-        fetchMembers(),
+      const memberData = await fetchMembers();
+      setAllMembers(memberData || []);
+
+      const [taskData, projectMemberData] = await Promise.all([
+        fetchTasks(project.id),       // ✅ ce GET déclenche syncOneProject côté serveur
         fetchProjectMembers(project.id),
       ]);
       setTasks(taskData || []);
-      setAllMembers(memberData || []);
       setProjectMembers(projectMemberData || []);
+
+      // ✅ FIX : attendre ~800ms que le sync arrière-plan soit terminé,
+      //    puis récupérer les stats fraîches via l'endpoint /sync
+      setTimeout(async () => {
+        const freshStats = await syncProjectStats(project.id);
+        if (freshStats) {
+          setProject((prev) => ({
+            ...prev,
+            progress:          freshStats.progress,
+            riskScore:         freshStats.riskScore,
+            lateTasks:         freshStats.lateTasks,
+            blockedTasks:      freshStats.blockedTasks,
+            estimatesComplete: freshStats.estimatesComplete,
+            missingEstimates:  freshStats.missingEstimates,
+            riskIsPartial:     freshStats.isPartial,
+            aiSummary:         freshStats.explanation ?? prev.aiSummary,
+          }));
+        }
+      }, 800);
+
     } catch (err) {
       setError(err.message || "Erreur de chargement.");
     } finally {

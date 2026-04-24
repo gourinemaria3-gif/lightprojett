@@ -1,12 +1,12 @@
 "use strict";
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  Route — /api/dependencies (version finale)
+//  Route — /api/dependencies
 //
-//  CORRECTIONS suite review senior :
-//    - DELETE utilise removeDependencyWithRecalc (transaction)
-//    - Boolean(ext?.is_blocked) partout
-//    - Import de removeDependencyWithRecalc
+//  CORRECTIONS :
+//    1. syncOneProject() était après return → ne s'exécutait JAMAIS
+//       Fix : await syncOneProject() AVANT le return
+//    2. Guards taskMap dans GET pour tâches supprimées côté OP
 // ══════════════════════════════════════════════════════════════════════════════
 
 const express = require("express");
@@ -21,16 +21,14 @@ const {
 
 const {
   hasCycleFrom,
-  recalcBlockedState,
   addDependencyWithRecalc,
   removeDependencyWithRecalc,
   buildTaskMap,
   isDone,
 } = require("../services/dependencies");
 
-// ──────────────────────────────────────────────────────────────────────────────
-//  HELPER
-// ──────────────────────────────────────────────────────────────────────────────
+const { syncOneProject } = require("../services/syncProjectStats");
+
 function getAccess(userId, projectId, isAdmin) {
   if (isAdmin) return { role: "admin" };
   return getMemberRole(userId, projectId);
@@ -40,10 +38,10 @@ function getAccess(userId, projectId, isAdmin) {
 //  GET /api/dependencies/:taskId?projectId=X
 // ══════════════════════════════════════════════════════════════════════════════
 router.get("/:taskId", async (req, res) => {
-  const { taskId } = req.params;
+  const { taskId }    = req.params;
   const { projectId } = req.query;
-  const callerId = req.user.userId;
-  const isAdmin  = req.user.isAdmin;
+  const callerId      = req.user.userId;
+  const isAdmin       = req.user.isAdmin;
 
   if (!projectId) {
     return res.status(400).json({ message: "projectId est obligatoire en query param." });
@@ -55,30 +53,36 @@ router.get("/:taskId", async (req, res) => {
   }
 
   try {
-    // UN SEUL appel API
     const taskMap = await buildTaskMap(projectId, req.opToken);
 
-    // De quoi dépend cette tâche ?
-    const depsRaw = getDependenciesOf(taskId);
+    // GUARD 1 : la tâche demandée existe-t-elle encore dans OP ?
+    if (!taskMap[taskId]) {
+      return res.status(404).json({ message: `Tâche #${taskId} introuvable dans ce projet.` });
+    }
+
+    const depsRaw   = getDependenciesOf(taskId);
     const dependsOn = depsRaw.map((dep) => {
       const opTask = taskMap[dep.depends_on_task_op_id];
+      // GUARD 2 : dépendance qui pointe une tâche supprimée dans OP
       return {
         taskId:  dep.depends_on_task_op_id,
-        title:   opTask?.subject || `Tâche #${dep.depends_on_task_op_id}`,
+        title:   opTask?.subject || `Tâche #${dep.depends_on_task_op_id} (supprimée)`,
         status:  opTask?._links?.status?.title || "Inconnu",
-        isDone:  isDone(opTask),
+        isDone:  opTask ? isDone(opTask) : false,
+        missing: !opTask,
       };
     });
 
-    // Qui est bloqué PAR cette tâche ?
     const depsOnMeRaw = getDependents(taskId);
     const blockingFor = depsOnMeRaw.map((dep) => {
       const opTask = taskMap[dep.task_op_id];
       const ext    = getTaskExtension(dep.task_op_id);
+      // GUARD 3 : tâche dépendante supprimée dans OP
       return {
         taskId:    dep.task_op_id,
-        title:     opTask?.subject || `Tâche #${dep.task_op_id}`,
-        isBlocked: Boolean(ext?.is_blocked), // CORRECTION
+        title:     opTask?.subject || `Tâche #${dep.task_op_id} (supprimée)`,
+        isBlocked: Boolean(ext?.is_blocked),
+        missing:   !opTask,
       };
     });
 
@@ -86,7 +90,7 @@ router.get("/:taskId", async (req, res) => {
 
     return res.json({
       taskId:     Number(taskId),
-      isBlocked:  Boolean(ext?.is_blocked), // CORRECTION
+      isBlocked:  Boolean(ext?.is_blocked),
       dependsOn,
       blockingFor,
     });
@@ -134,15 +138,18 @@ router.post("/", async (req, res) => {
       return res.status(404).json({ message: `Tâche #${dependsOnTaskId} introuvable dans ce projet.` });
     }
 
-    // Détection de cycle complète via DFS
     if (hasCycleFrom(taskId, dependsOnTaskId)) {
       return res.status(400).json({
         message: "Dépendance circulaire détectée : cela créerait une boucle dans le graphe.",
       });
     }
 
-    // Insert + recalc dans une transaction
     const isNowBlocked = addDependencyWithRecalc(taskId, dependsOnTaskId, taskMap);
+
+    // ✅ CORRECTION : await syncOneProject AVANT le return
+    await syncOneProject(projectId, req.opToken).catch((err) =>
+      console.error("Erreur syncOneProject POST dep:", err.message)
+    );
 
     return res.status(201).json({
       message:         "Dépendance ajoutée.",
@@ -160,7 +167,6 @@ router.post("/", async (req, res) => {
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  DELETE /api/dependencies
-//  CORRECTION : utilise removeDependencyWithRecalc (transaction)
 // ══════════════════════════════════════════════════════════════════════════════
 router.delete("/", async (req, res) => {
   const { taskId, dependsOnTaskId, projectId } = req.body;
@@ -183,8 +189,12 @@ router.delete("/", async (req, res) => {
   try {
     const taskMap = await buildTaskMap(projectId, req.opToken);
 
-    // CORRECTION : suppression + recalc dans une transaction
     const isNowBlocked = removeDependencyWithRecalc(taskId, dependsOnTaskId, taskMap);
+
+    // ✅ CORRECTION : await syncOneProject AVANT le return
+    await syncOneProject(projectId, req.opToken).catch((err) =>
+      console.error("Erreur syncOneProject DELETE dep:", err.message)
+    );
 
     return res.json({
       message:   "Dépendance supprimée.",

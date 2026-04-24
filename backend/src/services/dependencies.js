@@ -1,15 +1,15 @@
 "use strict";
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  Service — dependencies.js
+//  Service — dependencies.js  (v3)
 //
-//  CORRECTIONS :
-//    1. notifyStateChange : déduplication temporelle (5 min) pour éviter
-//       le flood de notifications lors de patchs rapides
-//    2. Boolean(ext?.is_blocked) partout
-//    3. Garantie que task_extensions existe (ensureTaskExtension)
-//    4. removeDependencyWithRecalc en transaction
-//    5. propagateBlockingFrom récursif (tous dépendants directs + indirects)
+//  CHANGEMENTS vs v2 :
+//    - isTaskBlockedRecursive supprimé — remplacé par isTaskBlocked (direct)
+//    - Règle clarifiée : B est bloquée si AU MOINS UNE dépendance directe
+//      n'est pas terminée (isDone = false). Le retard n'entre pas en compte
+//      ici — il est géré par le score de risque.
+//    - recalcBlockedState simplifié (plus de cache, plus de récursivité)
+//    - Tâche supprimée dans OP → non bloquante (on skip)
 // ══════════════════════════════════════════════════════════════════════════════
 
 const {
@@ -19,96 +19,78 @@ const {
   setTaskBlocked,
   getTaskExtension,
   upsertTaskExtension,
-  createNotification,
-  getProjectManager,
-  getNotifications,
 } = require("../database/db");
 
-const { getTasks } = require("./openproject");
+const { getTasks }                               = require("./openproject");
+const { notifyTaskBlocked, notifyTaskUnblocked } = require("./notificationEngine");
 
 // ──────────────────────────────────────────────────────────────────────────────
-//  isDone
+//  isDone — cascade de détection (identique à riskAndProgress.js)
+//  Dupliquée ici pour éviter une dépendance circulaire entre services.
 // ──────────────────────────────────────────────────────────────────────────────
 const DONE_STATUSES = new Set([
-  "done", "closed", "finished", "resolved",
-  "rejected", "terminé", "terminée", "fermé", "fermée"
+  "done", "closed", "finished", "resolved", "rejected",
+  "terminé", "terminée", "fermé", "fermée", "completed",
+  "complete", "annulé", "annulée", "cancelled", "canceled",
 ]);
 
 function isDone(opTaskObject) {
   if (!opTaskObject) return false;
-  if (typeof opTaskObject.isClosed === "boolean") return opTaskObject.isClosed;
-  const statusTitle = opTaskObject._links?.status?.title || "";
-  return DONE_STATUSES.has(statusTitle.toLowerCase());
+  if (opTaskObject.isClosed === true) return true;
+  const pct = Number(opTaskObject.percentageDone ?? opTaskObject.percentComplete ?? -1);
+  if (pct === 100) return true;
+  const statusTitle = (
+    opTaskObject._links?.status?.title ||
+    opTaskObject.status?.title ||
+    ""
+  ).toLowerCase().trim();
+  if (statusTitle && DONE_STATUSES.has(statusTitle)) return true;
+  const statusHref = (opTaskObject._links?.status?.href || "").toLowerCase();
+  if (statusHref && (statusHref.includes("closed") || statusHref.includes("done"))) return true;
+  return false;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-//  hasCycleFrom — détection de cycle via DFS
+//  hasCycleFrom — détection de cycle via DFS (inchangée)
 // ──────────────────────────────────────────────────────────────────────────────
 function hasCycleFrom(taskId, dependsOnTaskId) {
   const visited = new Set();
-
   function dfs(currentId) {
     if (currentId === Number(taskId)) return true;
     if (visited.has(currentId)) return false;
     visited.add(currentId);
-
-    const deps = getDependenciesOf(currentId);
-    for (const dep of deps) {
+    for (const dep of getDependenciesOf(currentId)) {
       if (dfs(Number(dep.depends_on_task_op_id))) return true;
     }
     return false;
   }
-
   return dfs(Number(dependsOnTaskId));
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-//  isTaskBlockedRecursive — avec mémoïsation
+//  isTaskBlocked — RÈGLE FINALE
+//
+//  B est bloquée si au moins une de ses dépendances DIRECTES n'est pas
+//  terminée (isDone = false).
+//
+//  - On ne vérifie PAS le retard ici.
+//  - Si une tâche parente a été supprimée dans OP (absente de taskMap),
+//    on la considère comme "done" pour ne pas bloquer indéfiniment.
 // ──────────────────────────────────────────────────────────────────────────────
-function isTaskBlockedRecursive(taskId, taskMap, visited = new Set(), cache = new Map()) {
-  const id = Number(taskId);
+function isTaskBlocked(taskId, taskMap) {
+  const deps = getDependenciesOf(Number(taskId));
+  if (deps.length === 0) return false;
 
-  if (cache.has(id)) return cache.get(id);
-  if (visited.has(id)) return false;
-  visited.add(id);
-
-  const deps = getDependenciesOf(id);
-
-  let result = false;
   for (const dep of deps) {
     const depTask = taskMap[dep.depends_on_task_op_id];
-    if (!depTask) { result = true; break; }
-    if (!isDone(depTask)) { result = true; break; }
-    if (isTaskBlockedRecursive(dep.depends_on_task_op_id, taskMap, visited, cache)) {
-      result = true;
-      break;
-    }
+    if (!depTask) continue;           // supprimée dans OP → on skip
+    if (!isDone(depTask)) return true; // au moins une non terminée → bloquée
   }
-
-  cache.set(id, result);
-  return result;
+  return false;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-//  getAllDependentsRecursive — tous les dépendants (directs + indirects)
-// ──────────────────────────────────────────────────────────────────────────────
-function getAllDependentsRecursive(taskId, visited = new Set()) {
-  const result = [];
-  const direct = getDependents(taskId);
-
-  for (const d of direct) {
-    if (!visited.has(d.task_op_id)) {
-      visited.add(d.task_op_id);
-      result.push(d.task_op_id);
-      result.push(...getAllDependentsRecursive(d.task_op_id, visited));
-    }
-  }
-
-  return result;
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-//  ensureTaskExtension — garantit que la row existe dans task_extensions
+//  ensureTaskExtension
 // ──────────────────────────────────────────────────────────────────────────────
 function ensureTaskExtension(taskId) {
   if (!getTaskExtension(taskId)) {
@@ -117,156 +99,107 @@ function ensureTaskExtension(taskId) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-//  recalcBlockedState
+//  recalcBlockedState — recalcule et persiste l'état bloqué d'une tâche
 // ──────────────────────────────────────────────────────────────────────────────
-function recalcBlockedState(taskId, taskMap, cache = new Map()) {
-  const deps = getDependenciesOf(taskId);
+function recalcBlockedState(taskId, taskMap) {
   ensureTaskExtension(taskId);
-
-  if (deps.length === 0) {
-    setTaskBlocked(taskId, false);
-    return false;
-  }
-
-  const shouldBeBlocked = isTaskBlockedRecursive(taskId, taskMap, new Set(), cache);
+  const shouldBeBlocked = isTaskBlocked(taskId, taskMap);
   setTaskBlocked(taskId, shouldBeBlocked);
   return shouldBeBlocked;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-//  addDependencyWithRecalc — transaction : insert + recalc
+//  addDependencyWithRecalc
 // ──────────────────────────────────────────────────────────────────────────────
 function addDependencyWithRecalc(taskId, dependsOnTaskId, taskMap) {
   let isBlocked = false;
-  const cache   = new Map();
-
-  const trx = db.transaction(() => {
+  db.transaction(() => {
     db.prepare(`
       INSERT OR IGNORE INTO task_dependencies (task_op_id, depends_on_task_op_id)
       VALUES (?, ?)
     `).run(Number(taskId), Number(dependsOnTaskId));
-
-    ensureTaskExtension(taskId);
-    isBlocked = recalcBlockedState(taskId, taskMap, cache);
-  });
-
-  trx();
+    isBlocked = recalcBlockedState(taskId, taskMap);
+  })();
   return isBlocked;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-//  removeDependencyWithRecalc — transaction : delete + recalc
+//  removeDependencyWithRecalc
 // ──────────────────────────────────────────────────────────────────────────────
 function removeDependencyWithRecalc(taskId, dependsOnTaskId, taskMap) {
   let isBlocked = false;
-  const cache   = new Map();
-
-  const trx = db.transaction(() => {
+  db.transaction(() => {
     db.prepare(`
       DELETE FROM task_dependencies
       WHERE task_op_id = ? AND depends_on_task_op_id = ?
     `).run(Number(taskId), Number(dependsOnTaskId));
-
-    ensureTaskExtension(taskId);
-    isBlocked = recalcBlockedState(taskId, taskMap, cache);
-  });
-
-  trx();
+    isBlocked = recalcBlockedState(taskId, taskMap);
+  })();
   return isBlocked;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-//  propagateBlockingFrom — propagation récursive, un seul appel API
+//  getAllDependentsRecursive — tous les dépendants directs + indirects
+// ──────────────────────────────────────────────────────────────────────────────
+function getAllDependentsRecursive(taskId, visited = new Set()) {
+  const result = [];
+  for (const d of getDependents(taskId)) {
+    if (!visited.has(d.task_op_id)) {
+      visited.add(d.task_op_id);
+      result.push(d.task_op_id);
+      result.push(...getAllDependentsRecursive(d.task_op_id, visited));
+    }
+  }
+  return result;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+//  propagateBlockingFrom
+//
+//  Appelée quand une tâche (changedTaskId) change de statut dans OP.
+//  Recalcule l'état bloqué de tous ses dépendants (directs + indirects)
+//  et envoie les notifications si l'état a changé.
 // ──────────────────────────────────────────────────────────────────────────────
 async function propagateBlockingFrom(changedTaskId, projectId, opToken) {
   const allDependentIds = getAllDependentsRecursive(changedTaskId);
   if (allDependentIds.length === 0) return;
 
   const taskMap = await buildTaskMap(projectId, opToken);
-  const cache   = new Map();
 
   for (const task_op_id of allDependentIds) {
     const wasBlocked   = Boolean(getTaskExtension(task_op_id)?.is_blocked);
-    const isNowBlocked = recalcBlockedState(task_op_id, taskMap, cache);
+    const isNowBlocked = recalcBlockedState(task_op_id, taskMap);
 
     if (wasBlocked && !isNowBlocked) {
-      await notifyStateChange(task_op_id, projectId, "unblocked", taskMap);
+      const opTask     = taskMap[task_op_id];
+      const assigneeId = opTask?._links?.assignee?.href
+        ? Number(opTask._links.assignee.href.split("/").pop())
+        : null;
+      await notifyTaskUnblocked({ taskId: task_op_id, projectId, assigneeId })
+        .catch(err => console.error("Erreur notifyTaskUnblocked:", err.message));
+
     } else if (!wasBlocked && isNowBlocked) {
-      await notifyStateChange(task_op_id, projectId, "blocked", taskMap, changedTaskId);
+      const opTask     = taskMap[task_op_id];
+      const assigneeId = opTask?._links?.assignee?.href
+        ? Number(opTask._links.assignee.href.split("/").pop())
+        : null;
+      await notifyTaskBlocked({
+        taskId:          task_op_id,
+        projectId,
+        blockedByTaskId: changedTaskId,
+        assigneeId,
+      }).catch(err => console.error("Erreur notifyTaskBlocked:", err.message));
     }
   }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-//  notifyStateChange
-//
-//  CORRECTION : déduplication temporelle — on ne recrée pas une notification
-//  du même type pour la même tâche si une existe déjà dans les 5 dernières min.
-//  Evite le flood lors de patchs rapides consécutifs.
-// ──────────────────────────────────────────────────────────────────────────────
-const NOTIF_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
-
-function _hasRecentNotification(opUserId, type, taskId) {
-  try {
-    const recent = getNotifications(opUserId, { unreadOnly: false });
-    const cutoff = new Date(Date.now() - NOTIF_COOLDOWN_MS).toISOString();
-    return recent.some(
-      (n) =>
-        n.type === type &&
-        n.message.includes(`#${taskId}`) &&
-        n.created_at >= cutoff
-    );
-  } catch {
-    return false; // En cas d'erreur DB, on laisse passer la notification
-  }
-}
-
-function _safeCreateNotification(opUserId, type, message, taskId) {
-  if (_hasRecentNotification(opUserId, type, taskId)) return;
-  try {
-    createNotification(opUserId, type, message);
-  } catch (err) {
-    console.warn(`Erreur création notification pour user ${opUserId}:`, err.message);
-  }
-}
-
-async function notifyStateChange(taskId, projectId, type, taskMap, blockedByTaskId = null) {
-  try {
-    const message = type === "blocked"
-      ? `La tâche #${taskId} est bloquée car la tâche #${blockedByTaskId} n'est pas terminée.`
-      : `La tâche #${taskId} est débloquée, toutes ses dépendances sont terminées.`;
-
-    const notifiedIds = new Set();
-
-    // Notifie le manager
-    const manager = getProjectManager(projectId);
-    if (manager) {
-      _safeCreateNotification(manager.op_user_id, type, message, taskId);
-      notifiedIds.add(manager.op_user_id);
-    }
-
-    // Notifie l'assignee (depuis taskMap, 0 appel API)
-    const opTask       = taskMap[taskId];
-    const assigneeHref = opTask?._links?.assignee?.href;
-    if (assigneeHref) {
-      const assigneeId = Number(assigneeHref.split("/").pop());
-      if (assigneeId && !notifiedIds.has(assigneeId)) {
-        _safeCreateNotification(assigneeId, type, message, taskId);
-      }
-    }
-
-  } catch (err) {
-    console.warn(`Erreur notification ${type} tâche #${taskId}:`, err.message);
-  }
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-//  buildTaskMap — charge les tâches OP une seule fois
+//  buildTaskMap
 // ──────────────────────────────────────────────────────────────────────────────
 async function buildTaskMap(projectId, opToken) {
   const allTasks = await getTasks(projectId, opToken);
   const taskMap  = {};
-  allTasks.forEach((t) => { taskMap[t.id] = t; });
+  allTasks.forEach(t => { taskMap[t.id] = t; });
   return taskMap;
 }
 

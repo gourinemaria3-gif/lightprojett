@@ -23,6 +23,8 @@ const tasksRouter   = require("./src/routes/tasks");
 const createRouter  = require("./src/routes/createproject");
 const aiRouter      = require("./src/routes/ai");
 const depsRouter    = require("./src/routes/dependencies");
+const notificationsRouter = require("./src/routes/notifications");
+const { startCron }       = require("./src/services/cron");
 
 // ──────────────────────────────────────────────────────────────────────────────
 //  Vérification des variables d'environnement critiques
@@ -49,10 +51,10 @@ const app = express();
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 
 app.use(cors({
-  origin: FRONTEND_URL,
-  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+  origin: "*",
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
-  credentials: true,
+  credentials: false,
 }));
 
 app.use(express.json());
@@ -98,6 +100,7 @@ app.use("/api/tasks",         verifyToken, attachOpToken, tasksRouter);
 app.use("/api/createproject", verifyToken, attachOpToken, createRouter);
 app.use("/api/ai",            verifyToken, attachOpToken, aiRouter);
 app.use("/api/dependencies",  verifyToken, attachOpToken, depsRouter);
+app.use("/api/notifications", verifyToken, notificationsRouter);
 
 // ──────────────────────────────────────────────────────────────────────────────
 //  DÉMARRAGE
@@ -107,3 +110,4 @@ app.listen(PORT, () => {
   console.log(`✅ LightProject server running on port ${PORT}`);
   console.log(`   CORS autorisé pour : ${FRONTEND_URL}`);
 });
+startCron();

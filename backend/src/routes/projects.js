@@ -3,9 +3,10 @@
 // ══════════════════════════════════════════════════════════════════════════════
 //  Route — /api/projects
 //
-//  CORRECTIONS :
-//    - POST /:projectId/members : validation hourlyRate (Number(NaN) bloqué)
-//    - opToken via req.opToken partout (middleware attachOpToken)
+//  CORRECTIONS vs v3 :
+//    - Ajout de POST /:projectId/sync — endpoint de re-sync explicite
+//      appelé par ProjectDetailPage au montage du composant
+//    - hourlyRate validation conservée
 // ══════════════════════════════════════════════════════════════════════════════
 
 const express = require("express");
@@ -27,6 +28,7 @@ const {
   upsertUser,
 } = require("../database/db");
 const { requireAdmin, requireManager } = require("../middleware/checkRole");
+const { syncOneProject }               = require("../services/syncProjectStats");
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  GET /api/projects
@@ -50,17 +52,22 @@ router.get("/", async (req, res) => {
       const manager = getProjectManager(p.id);
       return {
         ...p,
-        startDate:    meta.start_date    || null,
-        endDate:      meta.end_date      || null,
-        workload:     meta.workload      || null,
-        progress:     meta.progress      || 0,
-        riskScore:    meta.risk_score    || 0,
-        lateTasks:    meta.late_tasks    || 0,
-        blockedTasks: meta.blocked_tasks || 0,
-        aiSummary:    meta.ai_summary    || null,
-        budgetTotal:  meta.budget_total  || null,
-        managerId:    manager?.op_user_id || null,
-        managerName:  manager?.name       || null,
+        startDate:         meta.start_date    || null,
+        endDate:           meta.end_date      || null,
+        workload:          meta.workload      || null,
+        progress:          meta.progress      || 0,
+        riskScore:         meta.risk_score    || 0,
+        lateTasks:         meta.late_tasks    || 0,
+        blockedTasks:      meta.blocked_tasks || 0,
+        aiSummary:         meta.ai_summary    || null,
+        budgetTotal:       meta.budget_total  || null,
+        estimatesComplete: meta.estimates_complete !== undefined
+          ? Boolean(meta.estimates_complete)
+          : true,
+        missingEstimates:  meta.missing_estimates  || 0,
+        riskIsPartial:     Boolean(meta.risk_is_partial),
+        managerId:         manager?.op_user_id || null,
+        managerName:       manager?.name       || null,
       };
     });
 
@@ -88,6 +95,43 @@ router.get("/members", async (req, res) => {
   } catch (error) {
     console.error("Erreur récupération membres:", error.message);
     res.status(500).json({ message: "Impossible de récupérer les membres." });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  POST /api/projects/:projectId/sync  — ✅ NOUVEAU
+//
+//  Endpoint appelé par ProjectDetailPage au montage pour forcer le recalcul
+//  des stats (riskScore, lateTasks, blockedTasks, progress) en temps réel.
+//  Retourne les stats fraîches sans bloquer la navigation.
+// ══════════════════════════════════════════════════════════════════════════════
+router.post("/:projectId/sync", async (req, res) => {
+  const { projectId } = req.params;
+  const callerId = req.user.userId;
+  const isAdmin  = req.user.isAdmin;
+
+  if (!isAdmin && !getMemberRole(callerId, projectId)) {
+    return res.status(403).json({ message: "Accès refusé à ce projet." });
+  }
+
+  try {
+    const stats = await syncOneProject(projectId, req.opToken);
+    if (!stats) {
+      return res.status(500).json({ message: "Impossible de synchroniser les stats." });
+    }
+    res.json({
+      progress:          stats.progress,
+      riskScore:         stats.riskScore,
+      lateTasks:         stats.lateTasks,
+      blockedTasks:      stats.blockedTasks,
+      estimatesComplete: stats.estimatesComplete,
+      missingEstimates:  stats.missingEstimates,
+      isPartial:         stats.isPartial,
+      explanation:       stats.explanation,
+    });
+  } catch (err) {
+    console.error(`[sync] Erreur projet ${projectId}:`, err.message);
+    res.status(500).json({ message: "Erreur sync.", detail: err.message });
   }
 });
 
@@ -128,9 +172,6 @@ router.get("/:projectId/members", async (req, res) => {
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  POST /api/projects/:projectId/members
-//
-//  CORRECTION : validation hourlyRate ajoutée
-//  Avant : Number("abc") = NaN passait sans erreur
 // ══════════════════════════════════════════════════════════════════════════════
 router.post("/:projectId/members", requireManager, async (req, res) => {
   const { projectId } = req.params;
@@ -144,7 +185,6 @@ router.post("/:projectId/members", requireManager, async (req, res) => {
     return res.status(400).json({ message: "Rôle invalide. Valeurs acceptées : manager, member." });
   }
 
-  // CORRECTION : validation explicite de hourlyRate
   let parsedHourlyRate = null;
   if (hourlyRate !== undefined && hourlyRate !== null && hourlyRate !== "") {
     parsedHourlyRate = Number(hourlyRate);
@@ -301,5 +341,4 @@ router.delete("/:projectId", requireAdmin, async (req, res) => {
     });
   }
 });
-
 module.exports = router;
