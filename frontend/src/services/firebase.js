@@ -1,17 +1,5 @@
-// ══════════════════════════════════════════════════════════════════════════════
-//  src/services/firebase.js  (FRONTEND)
-//
-//  Initialise Firebase côté client et gère :
-//    - La demande de permission push
-//    - La récupération du FCM token
-//    - L'envoi du token au backend pour le stocker dans current_session
-//    - La réception des messages quand l'app est au premier plan
-//
-//  npm install firebase
-// ══════════════════════════════════════════════════════════════════════════════
-
-import { initializeApp }       from "firebase/app";
-import { getMessaging, getToken, onMessage } from "firebase/messaging";
+import { initializeApp, getApps } from "firebase/app";
+import { getMessaging, getToken, onMessage, isSupported } from "firebase/messaging";
 
 const firebaseConfig = {
   apiKey:            "AIzaSyCujZRzksLQa9Tk0zQ93I6fuAmnY2E3Hb4",
@@ -22,41 +10,60 @@ const firebaseConfig = {
   appId:             "1:11994852223:web:845b4442163dab6606084a",
 };
 
-// Clé VAPID (depuis Firebase Console → Cloud Messaging → Certificats Web push)
-const VAPID_KEY = "BFRvoDEcBPEuQ2rjcGfRs2ZZw1XPdlnfO5EbRGVjpG65rTcGGNCKYz9xskgaxYKNSaf3a6BHxY4VoivvWOqw03s";
+const VAPID_KEY = "BOQPwQyJd-xOGbOqCzC2EJRrWhLoCHemB4TZgKsoltfLj9j3bvoPGDR9_ZO8_B1uQUpmeCIw0OrjC7eArQEkh2E";
 
-const app       = initializeApp(firebaseConfig);
-const messaging = getMessaging(app);
+// Singleton Firebase app
+const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
 
-// ──────────────────────────────────────────────────────────────────────────────
-//  requestPushPermission
-//
-//  Demande la permission push à l'utilisateur, récupère le FCM token
-//  et l'envoie au backend via PATCH /api/auth/fcm-token
-//
-//  À appeler une fois après le login de l'utilisateur.
-// ──────────────────────────────────────────────────────────────────────────────
+// ── getMessaging lazy — évite le crash sur Safari HTTP ───────────────────────
+let _messaging = null;
+
+async function getMessagingInstance() {
+  try {
+    const supported = await isSupported();
+    if (!supported) {
+      console.info("[FCM] Firebase Messaging non supporté sur ce navigateur.");
+      return null;
+    }
+    if (!_messaging) {
+      _messaging = getMessaging(app);
+    }
+    return _messaging;
+  } catch (err) {
+    console.info("[FCM] Messaging indisponible:", err.message);
+    return null;
+  }
+}
+
+// ── requestPushPermission ─────────────────────────────────────────────────────
 export async function requestPushPermission() {
   try {
-    // 1. Vérifie que le navigateur supporte les notifications
     if (!("Notification" in window)) {
       console.info("[FCM] Navigateur sans support notifications.");
       return null;
     }
 
-    // 2. Demande la permission (affiche le popup navigateur)
-    const permission = await Notification.requestPermission();
-    if (permission !== "granted") {
-      console.info("[FCM] Permission refusée par l'utilisateur.");
+    // Firebase Messaging nécessite HTTPS (sauf localhost)
+    const isLocalhost = window.location.hostname === "localhost";
+    const isHttps     = window.location.protocol === "https:";
+    if (!isLocalhost && !isHttps) {
+      console.info("[FCM] HTTPS requis pour les push — fonctionnera en production.");
       return null;
     }
 
-    // 3. Enregistre le service worker
+    const messaging = await getMessagingInstance();
+    if (!messaging) return null;
+
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") {
+      console.info("[FCM] Permission refusée.");
+      return null;
+    }
+
     const swReg = await navigator.serviceWorker.register("/firebase-messaging-sw.js");
 
-    // 4. Récupère le FCM token
     const token = await getToken(messaging, {
-      vapidKey:        VAPID_KEY,
+      vapidKey:                  VAPID_KEY,
       serviceWorkerRegistration: swReg,
     });
 
@@ -66,27 +73,24 @@ export async function requestPushPermission() {
     }
 
     console.log("[FCM] Token obtenu:", token.slice(0, 30) + "…");
-
-    // 5. Envoie le token au backend
     await saveFcmTokenToBackend(token);
-
     return token;
 
   } catch (err) {
-    console.error("[FCM] Erreur requestPushPermission:", err.message);
+    console.error("[FCM] Erreur:", err.message);
     return null;
   }
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-//  saveFcmTokenToBackend — envoie le token FCM au serveur
-// ──────────────────────────────────────────────────────────────────────────────
+// ── saveFcmTokenToBackend ─────────────────────────────────────────────────────
 async function saveFcmTokenToBackend(fcmToken) {
-  const jwt = localStorage.getItem("jwt");
+  const jwt     = localStorage.getItem("jwt");
   if (!jwt) return;
 
+  const BASE_URL = process.env.REACT_APP_API_URL || "http://localhost:5000";
+
   try {
-    await fetch("/api/auth/fcm-token", {
+    await fetch(`${BASE_URL}/api/auth/fcm-token`, {
       method:  "PATCH",
       headers: {
         "Content-Type":  "application/json",
@@ -100,20 +104,16 @@ async function saveFcmTokenToBackend(fcmToken) {
   }
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-//  onForegroundMessage
-//
-//  Callback appelé quand une notif arrive ET que l'app est au premier plan.
-//  Le service worker ne gère QUE l'arrière-plan.
-//
-//  Usage dans App.jsx :
-//    onForegroundMessage((payload) => {
-//      // afficher une toast notification dans l'UI
-//    });
-// ──────────────────────────────────────────────────────────────────────────────
-export function onForegroundMessage(callback) {
+// ── onForegroundMessage ───────────────────────────────────────────────────────
+export async function onForegroundMessage(callback) {
+  const messaging = await getMessagingInstance();
+  if (!messaging) return () => {};
+
   return onMessage(messaging, (payload) => {
-    console.log("[FCM] Message au premier plan:", payload);
+    console.log("[FCM] Message premier plan:", payload);
     callback(payload);
   });
 }
+
+
+

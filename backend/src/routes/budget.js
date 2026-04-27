@@ -3,11 +3,12 @@
 // ══════════════════════════════════════════════════════════════════════════════
 //  Route — /api/budget
 //
-//  Endpoints :
-//    GET  /api/budget/:projectId              → résumé budgétaire
-//    GET  /api/budget/:projectId/tasks        → détail par tâche
-//    GET  /api/budget/:projectId/timeline     → évolution chronologique
-//    PATCH /api/budget/:projectId             → définir/modifier budget total
+//  GET  /api/budget/:projectId              → résumé budgétaire (tous membres)
+//  GET  /api/budget/:projectId/tasks        → détail par tâche (manager/admin)
+//  GET  /api/budget/:projectId/timeline     → évolution chronologique (manager/admin)
+//  PATCH /api/budget/:projectId             → définir/modifier budget total (admin)
+//  PATCH /api/budget/:projectId/tasks/:taskId/hours  → chef fixe heures estimées
+//  PATCH /api/budget/:projectId/tasks/:taskId/rate   → membre fixe son taux
 // ══════════════════════════════════════════════════════════════════════════════
 
 const express = require("express");
@@ -22,12 +23,19 @@ const {
 
 const {
   getMemberRole,
-  upsertProjectMeta,
   getProjectMeta,
+  upsertProjectMeta,
+  getTaskExtension,
+  setEstimatedHours,
+  setMemberRate,
+  resetBudgetAlertedFlags,
 } = require("../database/db");
 
 const { requireManager } = require("../middleware/checkRole");
 
+// ──────────────────────────────────────────────────────────────────────────────
+//  Helper — vérifie l'accès au projet
+// ──────────────────────────────────────────────────────────────────────────────
 function getAccess(userId, projectId, isAdmin) {
   if (isAdmin) return { role: "admin" };
   return getMemberRole(userId, projectId);
@@ -35,19 +43,19 @@ function getAccess(userId, projectId, isAdmin) {
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  GET /api/budget/:projectId
-//  Résumé complet : budget total, coût estimé, coût réel, restant, % consommé
+//  Résumé : budget total, coût estimé, coût réel, restant, % consommé
+//  Accès : tous les membres du projet
 // ══════════════════════════════════════════════════════════════════════════════
-router.get("/:projectId", async (req, res) => {
+router.get("/:projectId", (req, res) => {
   const { projectId } = req.params;
-  const callerId = req.user.userId;
-  const isAdmin  = req.user.isAdmin;
+  const callerId      = req.user.userId;
+  const isAdmin       = req.user.isAdmin;
 
   const access = getAccess(callerId, projectId, isAdmin);
   if (!access) {
     return res.status(403).json({ message: "Accès refusé à ce projet." });
   }
 
-  // Les membres voient uniquement le résumé (pas le détail par tâche)
   try {
     const summary = getBudgetSummary(projectId);
     res.json(summary);
@@ -59,13 +67,13 @@ router.get("/:projectId", async (req, res) => {
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  GET /api/budget/:projectId/tasks
-//  Détail par tâche : coût estimé vs coût réel
-//  Accès : admin + manager uniquement
+//  Détail par tâche : heures estimées, taux, coût estimé vs réel
+//  Accès : manager / admin uniquement
 // ══════════════════════════════════════════════════════════════════════════════
-router.get("/:projectId/tasks", async (req, res) => {
+router.get("/:projectId/tasks", (req, res) => {
   const { projectId } = req.params;
-  const callerId = req.user.userId;
-  const isAdmin  = req.user.isAdmin;
+  const callerId      = req.user.userId;
+  const isAdmin       = req.user.isAdmin;
 
   const access = getAccess(callerId, projectId, isAdmin);
   if (!access || access.role === "member") {
@@ -85,13 +93,13 @@ router.get("/:projectId/tasks", async (req, res) => {
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  GET /api/budget/:projectId/timeline
-//  Évolution chronologique du coût réel (pour graphique)
-//  Accès : admin + manager
+//  Évolution chronologique du coût réel
+//  Accès : manager / admin uniquement
 // ══════════════════════════════════════════════════════════════════════════════
-router.get("/:projectId/timeline", async (req, res) => {
+router.get("/:projectId/timeline", (req, res) => {
   const { projectId } = req.params;
-  const callerId = req.user.userId;
-  const isAdmin  = req.user.isAdmin;
+  const callerId      = req.user.userId;
+  const isAdmin       = req.user.isAdmin;
 
   const access = getAccess(callerId, projectId, isAdmin);
   if (!access || access.role === "member") {
@@ -112,15 +120,23 @@ router.get("/:projectId/timeline", async (req, res) => {
 // ══════════════════════════════════════════════════════════════════════════════
 //  PATCH /api/budget/:projectId
 //  Définir ou modifier le budget total du projet.
-//  Accès : admin + manager
+//  Accès : ADMIN uniquement (le budget global est fixé par l'admin)
 //
 //  Body : { budgetTotal: number }
 // ══════════════════════════════════════════════════════════════════════════════
-router.patch("/:projectId", requireManager, async (req, res) => {
+router.patch("/:projectId", async (req, res) => {
   const { projectId } = req.params;
+  const isAdmin       = req.user.isAdmin;
+
+  // Seul l'admin peut fixer le budget total
+  if (!isAdmin) {
+    return res.status(403).json({
+      message: "Seul l'administrateur peut définir le budget total du projet.",
+    });
+  }
+
   const { budgetTotal } = req.body;
 
-  // Validation
   if (budgetTotal === undefined || budgetTotal === null) {
     return res.status(400).json({ message: "budgetTotal est obligatoire." });
   }
@@ -134,6 +150,11 @@ router.patch("/:projectId", requireManager, async (req, res) => {
 
   try {
     const meta = getProjectMeta(projectId) || {};
+
+    // Si le budget change de valeur → reset des flags d'alerte (nouveau seuil)
+    if (meta.budget_total !== parsed) {
+      resetBudgetAlertedFlags(projectId);
+    }
 
     upsertProjectMeta(projectId, {
       startDate:         meta.start_date    || null,
@@ -155,13 +176,109 @@ router.patch("/:projectId", requireManager, async (req, res) => {
     const summary = await refreshBudgetForProject(projectId);
 
     res.json({
-      message:     "Budget mis à jour.",
+      message:     "Budget total mis à jour.",
       budgetTotal: parsed,
       summary,
     });
   } catch (err) {
     console.error("[budget PATCH] Erreur:", err.message);
     res.status(500).json({ message: "Erreur mise à jour budget.", detail: err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  PATCH /api/budget/:projectId/tasks/:taskId/hours
+//  Chef de projet — fixe les heures estimées d'une tâche.
+//  Recalcule estimated_cost si le member_rate est déjà défini.
+//
+//  Body : { estimatedHours: number }
+// ══════════════════════════════════════════════════════════════════════════════
+router.patch("/:projectId/tasks/:taskId/hours", requireManager, async (req, res) => {
+  const { projectId, taskId } = req.params;
+  const { estimatedHours }    = req.body;
+
+  if (estimatedHours === undefined || estimatedHours === null) {
+    return res.status(400).json({ message: "estimatedHours est obligatoire." });
+  }
+
+  const parsed = Number(estimatedHours);
+  if (isNaN(parsed) || parsed <= 0) {
+    return res.status(400).json({
+      message: "estimatedHours doit être un nombre strictement positif.",
+    });
+  }
+
+  try {
+    setEstimatedHours(Number(taskId), parsed, Number(projectId));
+
+    // Récupère l'extension mise à jour
+    const ext = getTaskExtension(Number(taskId));
+
+    res.json({
+      message:        "Heures estimées mises à jour.",
+      taskId:         Number(taskId),
+      estimatedHours: parsed,
+      memberRate:     ext?.member_rate     ?? null,
+      estimatedCost:  ext?.estimated_cost  ?? null,
+    });
+  } catch (err) {
+    console.error("[budget/hours PATCH] Erreur:", err.message);
+    res.status(500).json({ message: "Erreur mise à jour heures estimées.", detail: err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  PATCH /api/budget/:projectId/tasks/:taskId/rate
+//  Membre — déclare son taux horaire pour cette tâche spécifique.
+//  Recalcule estimated_cost et actual_cost immédiatement.
+//  Déclenche refreshBudgetForProject pour vérifier les alertes.
+//
+//  Body : { memberRate: number }
+// ══════════════════════════════════════════════════════════════════════════════
+router.patch("/:projectId/tasks/:taskId/rate", async (req, res) => {
+  const { projectId, taskId } = req.params;
+  const callerId              = req.user.userId;
+  const isAdmin               = req.user.isAdmin;
+
+  // Vérification accès : membre du projet (ou manager/admin)
+  const access = getAccess(callerId, projectId, isAdmin);
+  if (!access) {
+    return res.status(403).json({ message: "Accès refusé à ce projet." });
+  }
+
+  const { memberRate } = req.body;
+
+  if (memberRate === undefined || memberRate === null) {
+    return res.status(400).json({ message: "memberRate est obligatoire." });
+  }
+
+  const parsed = Number(memberRate);
+  if (isNaN(parsed) || parsed <= 0) {
+    return res.status(400).json({
+      message: "memberRate doit être un nombre strictement positif (DA/h).",
+    });
+  }
+
+  try {
+    setMemberRate(Number(taskId), parsed, Number(projectId));
+
+    // Recalcul budget projet + alertes
+    const summary = await refreshBudgetForProject(projectId);
+
+    // Récupère l'extension mise à jour
+    const ext = getTaskExtension(Number(taskId));
+
+    res.json({
+      message:        "Taux horaire mis à jour.",
+      taskId:         Number(taskId),
+      memberRate:     parsed,
+      estimatedCost:  ext?.estimated_cost ?? null,
+      actualCost:     ext?.actual_cost    ?? null,
+      budgetSummary:  summary,
+    });
+  } catch (err) {
+    console.error("[budget/rate PATCH] Erreur:", err.message);
+    res.status(500).json({ message: "Erreur mise à jour taux horaire.", detail: err.message });
   }
 });
 

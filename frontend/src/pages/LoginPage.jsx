@@ -1,10 +1,14 @@
 import React, { useState } from "react";
 import "./LoginPage.css";
+import { requestPushPermission } from "../services/firebase";
+import beeMascot from "../assets/beee_mascot.png";
+
+const BASE_URL = process.env.REACT_APP_API_URL || "http://localhost:5000";
 
 export default function LoginPage({ onLogin }) {
-  const [token,   setToken]   = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error,   setError]   = useState(null);
+  const [token,    setToken]    = useState("");
+  const [loading,  setLoading]  = useState(false);
+  const [error,    setError]    = useState(null);
 
   async function handleLogin() {
     if (!token.trim()) {
@@ -13,20 +17,23 @@ export default function LoginPage({ onLogin }) {
     }
     setLoading(true);
     setError(null);
+
     try {
-      const res = await fetch("http://localhost:5000/api/auth/login", {
-        method: "POST",
+      const res = await fetch(`${BASE_URL}/api/auth/login`, {
+        method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token: token.trim() }),
+        body:    JSON.stringify({ token: token.trim() }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || "Erreur de connexion.");
 
-      // Stocker JWT + user (avec isAdmin) dans localStorage
-      localStorage.setItem("jwt", data.jwt);
-      localStorage.setItem("user", JSON.stringify(data.user)); // data.user contient isAdmin
+      localStorage.setItem("jwt",  data.jwt);
+      localStorage.setItem("user", JSON.stringify(data.user));
 
-      onLogin(data.user); // { id, name, email, isAdmin }
+      // Token FCM en arrière-plan (silencieux si non supporté)
+      requestPushPermission().catch(() => {});
+
+      onLogin(data.user);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -35,40 +42,100 @@ export default function LoginPage({ onLogin }) {
   }
 
   return (
-    <div className="login-page">
-      <div className="login-card">
-        <div className="login-logo">Light<span>Project</span></div>
-        <p className="login-version">v1.0 — Bêta</p>
+    <div className="lp-page">
+      {/* Blobs de fond */}
+      <div className="lp-blob lp-blob--tl" />
+      <div className="lp-blob lp-blob--br" />
 
-        <h1 className="login-title">Connexion</h1>
-        <p className="login-sub">
-          Entrez votre token API OpenProject pour accéder à l'application.
-        </p>
+      <div className="lp-card">
 
-        <div className="login-field">
-          <label>Token API OpenProject</label>
-          <input
-            type="password"
-            placeholder="Collez votre token ici..."
-            value={token}
-            onChange={(e) => setToken(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleLogin()}
-          />
+        {/* ── GAUCHE ── */}
+        <div className="lp-left">
+          <div className="lp-blob lp-blob--left1" />
+          <div className="lp-blob lp-blob--left2" />
+
+          <div className="lp-logo">
+            <div className="lp-logo__dot" />
+            <span className="lp-logo__text">lightproject</span>
+          </div>
+
+          <div className="lp-mascot">
+            <img src={beeMascot} alt="mascotte abeille" className="lp-mascot__img" />
+          </div>
+
+          <h1 className="lp-title">
+            Gérez vos projets<br />
+            <em className="lp-title__em">avec élégance</em>
+          </h1>
+          <p className="lp-subtitle">
+            Une plateforme moderne pour suivre vos projets et collaborer en équipe.
+          </p>
+
+          <div className="lp-features">
+            {[
+              { icon: "📁", label: "Gestion de projets simplifiée" },
+              { icon: "✅", label: "Suivi des tâches en temps réel" },
+              { icon: "✨", label: "Analyse IA avec Google Gemini" },
+              { icon: "🔗", label: "Synchronisé avec OpenProject" },
+            ].map(({ icon, label }) => (
+              <div className="lp-feat" key={label}>
+                <div className="lp-feat__icon">{icon}</div>
+                <span>{label}</span>
+              </div>
+            ))}
+          </div>
         </div>
 
-        <p className="login-hint">
-          💡 Trouvez votre token dans OpenProject → Mon compte → Tokens d'accès API
-        </p>
+        {/* ── DROITE ── */}
+        <div className="lp-right">
+          <span className="lp-badge">✦ Connexion sécurisée</span>
 
-        {error && <p className="login-error">⚠️ {error}</p>}
+          <h2 className="lp-form-title">Bon retour !</h2>
+          <p className="lp-form-sub">
+            Entre ton token OpenProject pour accéder à ton espace de travail.
+          </p>
 
-        <button className="login-btn" onClick={handleLogin} disabled={loading}>
-          {loading ? (
-            <><span className="login-spinner" /> Connexion en cours...</>
-          ) : (
-            "Se connecter →"
-          )}
-        </button>
+          <label className="lp-label">TOKEN OPENPROJECT</label>
+          <div className="lp-input-wrap">
+            <span className="lp-input-icon">🔑</span>
+            <input
+              type="password"
+              placeholder="Entre ton token ici..."
+              className="lp-input"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleLogin()}
+            />
+          </div>
+
+          <p className="lp-hint">OpenProject → Profil → Token d'accès</p>
+
+          {error && <p className="lp-error">⚠️ {error}</p>}
+
+          <button
+            className="lp-btn"
+            onClick={handleLogin}
+            disabled={loading}
+          >
+            {loading ? (
+              <><span className="lp-spinner" /> Connexion en cours...</>
+            ) : (
+              "Se connecter →"
+            )}
+          </button>
+
+          <div className="lp-divider">
+            <div className="lp-divider__line" />
+            <span className="lp-divider__text">besoin d'aide ?</span>
+            <div className="lp-divider__line" />
+          </div>
+
+          <p className="lp-footer">
+            Contacte ton administrateur ou consulte{" "}
+            <span className="lp-footer__link">la documentation OpenProject</span>
+          </p>
+        </div>
+
       </div>
     </div>
   );

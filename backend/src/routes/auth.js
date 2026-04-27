@@ -43,7 +43,9 @@ router.post("/login", async (req, res) => {
     const isAdmin = opUser.admin === true;
 
     upsertUser(userId, { name, email, isAdmin });
-    saveSession(userId, { opToken: token, isAdmin });
+
+    // ✅ MODIF 1 — ajout de deviceId requis par saveSession
+    saveSession(userId, { opToken: token, isAdmin, deviceId: "web" });
 
     const jwtToken = jwt.sign(
       { userId, isAdmin },
@@ -51,15 +53,22 @@ router.post("/login", async (req, res) => {
       { expiresIn: "8h" }
     );
 
+    // ✅ MODIF 2 — on retourne jwt ET token pour compatibilité frontend
     return res.status(200).json({
       message: "Connexion réussie.",
-      jwt: jwtToken,
+      jwt:   jwtToken,
+      token: jwtToken,
       user: { id: userId, name, email, isAdmin },
     });
 
   } catch (error) {
     if (error.response?.status === 401) {
       return res.status(401).json({ message: "Token OpenProject invalide ou expiré." });
+    }
+
+    // ✅ MODIF 3 — gestion du cas 404 (mauvaise URL OpenProject)
+    if (error.response?.status === 404) {
+      return res.status(500).json({ message: "URL OpenProject incorrecte — vérifiez OP_BASE_URL dans .env" });
     }
 
     if (

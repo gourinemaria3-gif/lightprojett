@@ -4,9 +4,10 @@
 //  Route — /api/dependencies
 //
 //  CORRECTIONS :
-//    1. syncOneProject() était après return → ne s'exécutait JAMAIS
-//       Fix : await syncOneProject() AVANT le return
-//    2. Guards taskMap dans GET pour tâches supprimées côté OP
+//    1. POST → notif "blocked" envoyée au membre assigné quand dépendance créée
+//    2. DELETE → notif "unblocked" envoyée si la tâche n'est plus bloquée
+//    3. PATCH statut tâche → propagateBlockingFrom envoie "unblocked" si tâche
+//       bloquante devient terminée
 // ══════════════════════════════════════════════════════════════════════════════
 
 const express = require("express");
@@ -27,7 +28,11 @@ const {
   isDone,
 } = require("../services/dependencies");
 
-const { syncOneProject } = require("../services/syncProjectStats");
+const { syncOneProject }   = require("../services/syncProjectStats");
+const {
+  notifyTaskBlocked,
+  notifyTaskUnblocked,
+} = require("../services/notificationEngine");
 
 function getAccess(userId, projectId, isAdmin) {
   if (isAdmin) return { role: "admin" };
@@ -55,7 +60,6 @@ router.get("/:taskId", async (req, res) => {
   try {
     const taskMap = await buildTaskMap(projectId, req.opToken);
 
-    // GUARD 1 : la tâche demandée existe-t-elle encore dans OP ?
     if (!taskMap[taskId]) {
       return res.status(404).json({ message: `Tâche #${taskId} introuvable dans ce projet.` });
     }
@@ -63,7 +67,6 @@ router.get("/:taskId", async (req, res) => {
     const depsRaw   = getDependenciesOf(taskId);
     const dependsOn = depsRaw.map((dep) => {
       const opTask = taskMap[dep.depends_on_task_op_id];
-      // GUARD 2 : dépendance qui pointe une tâche supprimée dans OP
       return {
         taskId:  dep.depends_on_task_op_id,
         title:   opTask?.subject || `Tâche #${dep.depends_on_task_op_id} (supprimée)`,
@@ -77,7 +80,6 @@ router.get("/:taskId", async (req, res) => {
     const blockingFor = depsOnMeRaw.map((dep) => {
       const opTask = taskMap[dep.task_op_id];
       const ext    = getTaskExtension(dep.task_op_id);
-      // GUARD 3 : tâche dépendante supprimée dans OP
       return {
         taskId:    dep.task_op_id,
         title:     opTask?.subject || `Tâche #${dep.task_op_id} (supprimée)`,
@@ -103,6 +105,7 @@ router.get("/:taskId", async (req, res) => {
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  POST /api/dependencies
+//  → Notif "blocked" envoyée immédiatement si la tâche est maintenant bloquée
 // ══════════════════════════════════════════════════════════════════════════════
 router.post("/", async (req, res) => {
   const { taskId, dependsOnTaskId, projectId } = req.body;
@@ -146,7 +149,27 @@ router.post("/", async (req, res) => {
 
     const isNowBlocked = addDependencyWithRecalc(taskId, dependsOnTaskId, taskMap);
 
-    // ✅ CORRECTION : await syncOneProject AVANT le return
+    // ── Notif "blocked" si la tâche est maintenant bloquée ───────────────────
+    if (isNowBlocked) {
+      const blockedTask  = taskMap[taskId];
+      const blockingTask = taskMap[dependsOnTaskId];
+      const assigneeId   = blockedTask?._links?.assignee?.href
+        ? Number(blockedTask._links.assignee.href.split("/").pop())
+        : null;
+
+      console.log(`[DEP] Tâche #${taskId} bloquée par #${dependsOnTaskId} → notif user ${assigneeId || "manager"}`);
+
+      await notifyTaskBlocked({
+        taskId,
+        taskTitle:       blockedTask?.subject  || `#${taskId}`,
+        blockedByTaskId: dependsOnTaskId,
+        blockedByTitle:  blockingTask?.subject || `#${dependsOnTaskId}`,
+        assigneeId,
+        projectId,
+      }).catch(err => console.error("[DEP] Erreur notifyTaskBlocked:", err.message));
+    }
+
+    // Sync stats
     await syncOneProject(projectId, req.opToken).catch((err) =>
       console.error("Erreur syncOneProject POST dep:", err.message)
     );
@@ -167,6 +190,7 @@ router.post("/", async (req, res) => {
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  DELETE /api/dependencies
+//  → Notif "unblocked" envoyée si la tâche n'est plus bloquée après suppression
 // ══════════════════════════════════════════════════════════════════════════════
 router.delete("/", async (req, res) => {
   const { taskId, dependsOnTaskId, projectId } = req.body;
@@ -189,9 +213,29 @@ router.delete("/", async (req, res) => {
   try {
     const taskMap = await buildTaskMap(projectId, req.opToken);
 
+    // État AVANT suppression
+    const wasBlocked = Boolean(getTaskExtension(taskId)?.is_blocked);
+
     const isNowBlocked = removeDependencyWithRecalc(taskId, dependsOnTaskId, taskMap);
 
-    // ✅ CORRECTION : await syncOneProject AVANT le return
+    // ── Notif "unblocked" si la tâche était bloquée et ne l'est plus ─────────
+    if (wasBlocked && !isNowBlocked) {
+      const task       = taskMap[taskId];
+      const assigneeId = task?._links?.assignee?.href
+        ? Number(task._links.assignee.href.split("/").pop())
+        : null;
+
+      console.log(`[DEP] Tâche #${taskId} débloquée → notif user ${assigneeId || "manager"}`);
+
+      await notifyTaskUnblocked({
+        taskId,
+        taskTitle:  task?.subject || `#${taskId}`,
+        assigneeId,
+        projectId,
+      }).catch(err => console.error("[DEP] Erreur notifyTaskUnblocked:", err.message));
+    }
+
+    // Sync stats
     await syncOneProject(projectId, req.opToken).catch((err) =>
       console.error("Erreur syncOneProject DELETE dep:", err.message)
     );

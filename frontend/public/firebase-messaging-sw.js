@@ -1,4 +1,6 @@
 /* eslint-disable */
+// public/firebase-messaging-sw.js
+// Service Worker pour les notifications push Firebase en arrière-plan
 
 importScripts("https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js");
 importScripts("https://www.gstatic.com/firebasejs/10.7.0/firebase-messaging-compat.js");
@@ -14,14 +16,20 @@ firebase.initializeApp({
 
 const messaging = firebase.messaging();
 
+// Notification reçue en arrière-plan (app fermée ou onglet inactif)
 messaging.onBackgroundMessage((payload) => {
+  console.log("[SW] Notification en arrière-plan reçue:", payload);
+
   const { title, body } = payload.notification || {};
-  self.registration.showNotification(title || "Light Project", {
-    body:    body || "",
+  const notifTitle = title || "LightProject";
+  const notifBody  = body  || "Vous avez une nouvelle notification.";
+
+  self.registration.showNotification(notifTitle, {
+    body:    notifBody,
     icon:    "/logo192.png",
     badge:   "/logo192.png",
     vibrate: [200, 100, 200],
-    data:    { url: payload.fcmOptions?.link || "/" },
+    data:    payload.data || {},
     actions: [
       { action: "open",    title: "Ouvrir" },
       { action: "dismiss", title: "Ignorer" },
@@ -29,20 +37,21 @@ messaging.onBackgroundMessage((payload) => {
   });
 });
 
+// Clic sur la notification → ouvre l'app
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   if (event.action === "dismiss") return;
 
-  const url = event.notification.data?.url || "/";
-
   event.waitUntil(
     clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {
       for (const client of clientList) {
-        if (client.url.includes(self.location.origin) && "focus" in client) {
+        if (client.url.includes("localhost:3000") && "focus" in client) {
           return client.focus();
         }
       }
-      if (clients.openWindow) return clients.openWindow(url);
+      if (clients.openWindow) {
+        return clients.openWindow("http://localhost:3000");
+      }
     })
   );
 });

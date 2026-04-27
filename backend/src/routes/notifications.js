@@ -34,6 +34,19 @@ router.get("/", (req, res) => {
   }
 });
 
+// GET /api/notifications/count  ← NOUVEAU
+router.get("/count", (req, res) => {
+  const opUserId = req.user.userId;
+  try {
+    const all   = getNotifications(opUserId, { unreadOnly: false });
+    const count = all.filter((n) => n.is_read === 0).length;
+    return res.json({ count });
+  } catch (err) {
+    console.error("[Notifications] COUNT error:", err.message);
+    return res.status(500).json({ message: "Erreur récupération du compteur." });
+  }
+});
+
 // PATCH /api/notifications/read-all
 router.patch("/read-all", (req, res) => {
   try {
@@ -77,7 +90,6 @@ router.put("/preferences", (req, res) => {
       enabled: 1, reminder_days: 3,
     };
 
-    // Fusionne push + email → un seul champ "enabled" dans la DB
     const newEnabled = (pushEnabled !== undefined || emailEnabled !== undefined)
       ? ((pushEnabled || emailEnabled) ? 1 : 0)
       : current.enabled;

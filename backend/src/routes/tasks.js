@@ -1,7 +1,18 @@
 "use strict";
 
+// ══════════════════════════════════════════════════════════════════════════════
+//  Route — /api/tasks
+//
+//  Modèle budget v2 :
+//    • member_rate est dans task_extensions, PAS dans time_logs
+//    • addTimeLog ne prend plus de hourlyRate → le taux est déjà dans l'extension
+//    • updateEstimatedCostForTask vient de budgetService (plus de import cassé)
+//    • refreshBudgetForProject déclenché après chaque time log add/delete
+// ══════════════════════════════════════════════════════════════════════════════
+
 const express = require("express");
 const router  = express.Router();
+
 const { getTasks, patchTask, createTask, deleteTask } = require("../services/openproject");
 const {
   addTimeLog,
@@ -9,20 +20,27 @@ const {
   deleteTimeLog,
   refreshActualCost,
   getMemberRole,
+  getTaskExtension,
 } = require("../database/db");
-const { propagateBlockingFrom } = require("../services/dependencies");
-const { syncOneProject } = require("../services/syncProjectStats");
+const { propagateBlockingFrom }   = require("../services/dependencies");
+const { syncOneProject }          = require("../services/syncProjectStats");
 const {
   notifyTaskAssigned,
   notifyTaskOverdue,
 } = require("../services/notificationEngine");
+const {
+  updateEstimatedCostForTask,
+  refreshBudgetForProject,
+} = require("../services/budgetService");
 
+// ──────────────────────────────────────────────────────────────────────────────
+//  Helpers
+// ──────────────────────────────────────────────────────────────────────────────
 function getAccess(userId, projectId, isAdmin) {
   if (isAdmin) return { role: "admin" };
   return getMemberRole(userId, projectId);
 }
 
-// ── Vérifie si une tâche est en retard ────────────────────────────────────────
 function isOverdue(task) {
   if (!task?.dueDate) return false;
   const isClosed = task.isClosed === true ||
@@ -37,10 +55,10 @@ function isOverdue(task) {
 //  GET /api/tasks/:projectId
 // ══════════════════════════════════════════════════════════════════════════════
 router.get("/:projectId", async (req, res) => {
-  const callerId  = req.user.userId;
-  const isAdmin   = req.user.isAdmin;
+  const callerId      = req.user.userId;
+  const isAdmin       = req.user.isAdmin;
   const { projectId } = req.params;
-  const opToken   = req.opToken;
+  const opToken       = req.opToken;
 
   const access = getAccess(callerId, projectId, isAdmin);
   if (!access) {
@@ -49,6 +67,10 @@ router.get("/:projectId", async (req, res) => {
 
   try {
     const tasks = await getTasks(projectId, opToken);
+
+    syncOneProject(projectId, opToken).catch(err =>
+      console.error(`[tasks GET] Erreur sync stats projet ${projectId}:`, err.message)
+    );
 
     if (access.role === "member") {
       const myTasks = tasks.filter((t) =>
@@ -70,10 +92,10 @@ router.get("/:projectId", async (req, res) => {
 //  POST /api/tasks/project/:projectId
 // ══════════════════════════════════════════════════════════════════════════════
 router.post("/project/:projectId", async (req, res) => {
-  const callerId  = req.user.userId;
-  const isAdmin   = req.user.isAdmin;
+  const callerId      = req.user.userId;
+  const isAdmin       = req.user.isAdmin;
   const { projectId } = req.params;
-  const opToken   = req.opToken;
+  const opToken       = req.opToken;
 
   const access = getAccess(callerId, projectId, isAdmin);
   if (!access || access.role === "member") {
@@ -89,7 +111,14 @@ router.post("/project/:projectId", async (req, res) => {
   try {
     const created = await createTask(projectId, req.body, opToken);
 
-    // ── Notif assignation si la tâche est créée avec un assignee ─────────────
+    if (req.body.estimatedHours) {
+      updateEstimatedCostForTask(created.id, {
+        estimatedHours: req.body.estimatedHours,
+        projectId,
+      });
+    }
+
+    // Notif assignation si la tâche est créée directement avec un assignee
     const newAssigneeId = created._links?.assignee?.href
       ? Number(created._links.assignee.href.split("/").pop())
       : null;
@@ -102,12 +131,16 @@ router.post("/project/:projectId", async (req, res) => {
       }).catch((err) => console.error("[Notif] assignation création:", err.message));
     }
 
+    syncOneProject(projectId, opToken).catch(err =>
+      console.error("[tasks POST] Erreur sync stats:", err.message)
+    );
+
     res.status(201).json(created);
   } catch (error) {
     console.error("Erreur création tâche:", error.response?.data || error.message);
     res.status(500).json({
       message: "Erreur création tâche.",
-      detail: error.response?.data || error.message,
+      detail:  error.response?.data || error.message,
     });
   }
 });
@@ -116,10 +149,10 @@ router.post("/project/:projectId", async (req, res) => {
 //  PATCH /api/tasks/:taskId
 // ══════════════════════════════════════════════════════════════════════════════
 router.patch("/:taskId", async (req, res) => {
-  const callerId  = req.user.userId;
-  const isAdmin   = req.user.isAdmin;
-  const { projectId } = req.body;
-  const opToken   = req.opToken;
+  const callerId          = req.user.userId;
+  const isAdmin           = req.user.isAdmin;
+  const { projectId }     = req.body;
+  const opToken           = req.opToken;
 
   if (!projectId) {
     return res.status(400).json({ message: "projectId est requis dans le body." });
@@ -132,7 +165,7 @@ router.patch("/:taskId", async (req, res) => {
 
   if (access.role === "member") {
     const allowedKeys = ["status", "lockVersion", "projectId"];
-    const forbidden = Object.keys(req.body).filter((k) => !allowedKeys.includes(k));
+    const forbidden   = Object.keys(req.body).filter((k) => !allowedKeys.includes(k));
     if (forbidden.length > 0) {
       return res.status(403).json({
         message: `En tant que membre, vous ne pouvez modifier que le statut. Champs refusés : ${forbidden.join(", ")}.`,
@@ -143,34 +176,31 @@ router.patch("/:taskId", async (req, res) => {
   try {
     const { projectId: _removed, ...patchData } = req.body;
 
-    // ── Récupère l'état de la tâche AVANT le patch ────────────────────────
-    const tasksBefore = await getTasks(projectId, opToken);
-    const taskBefore  = tasksBefore.find((t) => String(t.id) === String(req.params.taskId));
+    const tasksBefore   = await getTasks(projectId, opToken);
+    const taskBefore    = tasksBefore.find((t) => String(t.id) === String(req.params.taskId));
     const oldAssigneeId = taskBefore?._links?.assignee?.href
       ? Number(taskBefore._links.assignee.href.split("/").pop())
       : null;
 
-    // ── Applique le patch ─────────────────────────────────────────────────
     const result = await patchTask(req.params.taskId, patchData, opToken);
 
-    // ── FIX 1 : Notif assignation si l'assignee a changé ──────────────────
+    // Notif assignation si l'assignee a changé
     if (patchData.assignee !== undefined) {
       const newAssigneeId = result._links?.assignee?.href
         ? Number(result._links.assignee.href.split("/").pop())
         : null;
 
       if (newAssigneeId && newAssigneeId !== oldAssigneeId) {
-        notifyTaskAssigned({
+        await notifyTaskAssigned({
           assigneeId:  newAssigneeId,
           taskTitle:   result.subject,
           projectName: `Projet #${projectId}`,
           taskId:      req.params.taskId,
-        }).catch((err) => console.error("[Notif] assignation patch:", err.message));
+        }).catch((err) => console.error("Erreur notifyTaskAssigned:", err.message));
       }
     }
 
-    // ── FIX 2 : Notif retard si la dueDate vient d'être définie (ou changée)
-    //    et que la nouvelle date est déjà dans le passé ─────────────────────
+    // Notif retard si dueDate définie/changée et déjà dépassée
     if (patchData.dueDate !== undefined) {
       const assigneeId = result._links?.assignee?.href
         ? Number(result._links.assignee.href.split("/").pop())
@@ -186,12 +216,34 @@ router.patch("/:taskId", async (req, res) => {
       }
     }
 
-    // ── Propagation blocage + sync stats si statut changé ────────────────
-    if (patchData.status) {
-      Promise.all([
-        propagateBlockingFrom(req.params.taskId, projectId, opToken),
+    // Recalcul coût estimé si estimatedHours change
+    if (patchData.estimatedHours !== undefined) {
+      let estimatedHours = patchData.estimatedHours;
+      if (!estimatedHours && result.estimatedTime) {
+        const str   = String(result.estimatedTime).toUpperCase();
+        const days  = Number(str.match(/(\d+(?:\.\d+)?)D/)?.[1]  ?? 0);
+        const hours = Number(str.match(/T(\d+(?:\.\d+)?)H/)?.[1] ?? 0);
+        estimatedHours = days * 8 + hours;
+      }
+      if (estimatedHours) {
+        updateEstimatedCostForTask(req.params.taskId, {
+          estimatedHours,
+          projectId,
+        });
+      }
+    }
+
+    // Post-patch : propagation blocage + sync stats + alertes budget
+    try {
+      await Promise.all([
+        patchData.status
+          ? propagateBlockingFrom(req.params.taskId, projectId, opToken)
+          : Promise.resolve(),
         syncOneProject(projectId, opToken),
-      ]).catch((err) => console.error("[Post-patch] propagation/stats:", err.message));
+        refreshBudgetForProject(projectId),
+      ]);
+    } catch (err) {
+      console.error("Erreur post-patch (propagation/stats/budget):", err.message);
     }
 
     res.json(result);
@@ -199,7 +251,7 @@ router.patch("/:taskId", async (req, res) => {
     console.error("Erreur patch tâche:", error.response?.data || error.message);
     res.status(500).json({
       message: "Erreur mise à jour tâche.",
-      detail: error.response?.data || error.message,
+      detail:  error.response?.data || error.message,
     });
   }
 });
@@ -208,10 +260,10 @@ router.patch("/:taskId", async (req, res) => {
 //  DELETE /api/tasks/:taskId
 // ══════════════════════════════════════════════════════════════════════════════
 router.delete("/:taskId", async (req, res) => {
-  const callerId  = req.user.userId;
-  const isAdmin   = req.user.isAdmin;
+  const callerId      = req.user.userId;
+  const isAdmin       = req.user.isAdmin;
   const { projectId } = req.body;
-  const opToken   = req.opToken;
+  const opToken       = req.opToken;
 
   if (!projectId) {
     return res.status(400).json({ message: "projectId est requis dans le body." });
@@ -226,6 +278,11 @@ router.delete("/:taskId", async (req, res) => {
 
   try {
     await deleteTask(req.params.taskId, opToken);
+
+    syncOneProject(projectId, opToken).catch(err =>
+      console.error("[tasks DELETE] Erreur sync stats:", err.message)
+    );
+
     res.status(204).send();
   } catch (error) {
     console.error("Erreur suppression tâche:", error.response?.data || error.message);
@@ -235,18 +292,26 @@ router.delete("/:taskId", async (req, res) => {
       return res.status(404).json({ message: "Tâche introuvable." });
     res.status(500).json({
       message: "Impossible de supprimer la tâche.",
-      detail: error.response?.data || error.message,
+      detail:  error.response?.data || error.message,
     });
   }
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  TIME LOGS
+//  POST /api/tasks/:taskId/timelogs
+//
+//  MODÈLE BUDGET V2 :
+//    Le taux (member_rate) est stocké dans task_extensions, PAS dans time_logs.
+//    addTimeLog n'a donc plus besoin de hourlyRate.
+//    Le coût réel est recalculé automatiquement par refreshActualCost()
+//    qui lit task_extensions.member_rate.
+//
+//    Accès manager/admin pour saisir les heures pour n'importe quel membre.
+//    Accès membre pour saisir SES propres heures (limité à son opUserId).
 // ══════════════════════════════════════════════════════════════════════════════
-
 router.post("/:taskId/timelogs", async (req, res) => {
-  const callerId = req.user.userId;
-  const isAdmin  = req.user.isAdmin;
+  const callerId   = req.user.userId;
+  const isAdmin    = req.user.isAdmin;
   const { taskId } = req.params;
   const { opUserId, hoursWorked, loggedDate, note, projectId } = req.body;
 
@@ -257,9 +322,13 @@ router.post("/:taskId/timelogs", async (req, res) => {
   }
 
   const access = getAccess(callerId, projectId, isAdmin);
-  if (!access || access.role === "member") {
+  if (!access) {
+    return res.status(403).json({ message: "Accès refusé à ce projet." });
+  }
+
+  if (access.role === "member" && String(opUserId) !== String(callerId)) {
     return res.status(403).json({
-      message: "Seul le chef de projet ou l'admin peut saisir les heures.",
+      message: "En tant que membre, vous ne pouvez saisir que vos propres heures.",
     });
   }
 
@@ -268,8 +337,16 @@ router.post("/:taskId/timelogs", async (req, res) => {
   }
 
   try {
-    const id = addTimeLog(taskId, opUserId, { hoursWorked, loggedDate, note });
-    refreshActualCost(taskId);
+    const id = addTimeLog(taskId, opUserId, {
+      hoursWorked: Number(hoursWorked),
+      loggedDate:  loggedDate || new Date().toISOString().slice(0, 10),
+      note:        note       || null,
+    });
+
+    refreshBudgetForProject(projectId).catch(err =>
+      console.error("[budget] Erreur après time log:", err.message)
+    );
+
     res.status(201).json({ message: "Heures enregistrées.", id });
   } catch (err) {
     console.error("Erreur time log:", err.message);
@@ -277,10 +354,13 @@ router.post("/:taskId/timelogs", async (req, res) => {
   }
 });
 
+// ══════════════════════════════════════════════════════════════════════════════
+//  GET /api/tasks/:taskId/timelogs
+// ══════════════════════════════════════════════════════════════════════════════
 router.get("/:taskId/timelogs", async (req, res) => {
   const { projectId } = req.query;
-  const callerId = req.user.userId;
-  const isAdmin  = req.user.isAdmin;
+  const callerId      = req.user.userId;
+  const isAdmin       = req.user.isAdmin;
 
   if (projectId) {
     const access = getAccess(callerId, projectId, isAdmin);
@@ -289,17 +369,31 @@ router.get("/:taskId/timelogs", async (req, res) => {
 
   try {
     const logs = getTimeLogsForTask(req.params.taskId);
-    res.json(logs);
+    const ext  = getTaskExtension(Number(req.params.taskId));
+    const rate = ext?.member_rate ?? null;
+
+    const enriched = logs.map(log => ({
+      ...log,
+      member_rate:   rate,
+      computed_cost: rate != null
+        ? Math.round(log.hours_worked * rate * 100) / 100
+        : null,
+    }));
+
+    res.json(enriched);
   } catch (err) {
     res.status(500).json({ message: "Erreur récupération des heures.", detail: err.message });
   }
 });
 
+// ══════════════════════════════════════════════════════════════════════════════
+//  DELETE /api/tasks/:taskId/timelogs/:logId
+// ══════════════════════════════════════════════════════════════════════════════
 router.delete("/:taskId/timelogs/:logId", async (req, res) => {
   const { taskId, logId } = req.params;
-  const { projectId } = req.body;
-  const callerId = req.user.userId;
-  const isAdmin  = req.user.isAdmin;
+  const { projectId }     = req.body;
+  const callerId          = req.user.userId;
+  const isAdmin           = req.user.isAdmin;
 
   if (!projectId) return res.status(400).json({ message: "projectId requis." });
 
@@ -312,7 +406,11 @@ router.delete("/:taskId/timelogs/:logId", async (req, res) => {
 
   try {
     deleteTimeLog(logId);
-    refreshActualCost(taskId);
+
+    refreshBudgetForProject(projectId).catch(err =>
+      console.error("[budget] Erreur après suppression time log:", err.message)
+    );
+
     res.status(204).send();
   } catch (err) {
     res.status(500).json({ message: "Erreur suppression.", detail: err.message });

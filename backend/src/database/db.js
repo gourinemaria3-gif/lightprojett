@@ -11,8 +11,6 @@ db.pragma("foreign_keys = ON");
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  CHIFFREMENT AES-256-GCM du op_token
-//  ENCRYPTION_KEY = 64 caractères hex dans .env
-//  Générer : node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 // ══════════════════════════════════════════════════════════════════════════════
 
 const ALGO           = "aes-256-gcm";
@@ -20,8 +18,7 @@ const KEY_HEX        = process.env.ENCRYPTION_KEY || "";
 const ENCRYPTION_KEY = KEY_HEX ? Buffer.from(KEY_HEX, "hex") : null;
 
 function encryptToken(token) {
-  if (!ENCRYPTION_KEY)
-    throw new Error("ENCRYPTION_KEY manquante dans .env");
+  if (!ENCRYPTION_KEY) throw new Error("ENCRYPTION_KEY manquante dans .env");
   const iv     = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv(ALGO, ENCRYPTION_KEY, iv);
   const enc    = Buffer.concat([cipher.update(token, "utf8"), cipher.final()]);
@@ -30,8 +27,7 @@ function encryptToken(token) {
 }
 
 function decryptToken(stored) {
-  if (!ENCRYPTION_KEY)
-    throw new Error("ENCRYPTION_KEY manquante dans .env");
+  if (!ENCRYPTION_KEY) throw new Error("ENCRYPTION_KEY manquante dans .env");
   const [ivHex, tagHex, dataHex] = stored.split(":");
   const decipher = crypto.createDecipheriv(ALGO, ENCRYPTION_KEY, Buffer.from(ivHex, "hex"));
   decipher.setAuthTag(Buffer.from(tagHex, "hex"));
@@ -48,9 +44,6 @@ function decryptToken(stored) {
 
 db.exec(`
 
-  -- ──────────────────────────────────────────────────────────────────────────
-  --  1. USERS
-  -- ──────────────────────────────────────────────────────────────────────────
   CREATE TABLE IF NOT EXISTS users (
     op_user_id  INTEGER PRIMARY KEY,
     name        TEXT    NOT NULL,
@@ -59,12 +52,6 @@ db.exec(`
     updated_at  TEXT    NOT NULL DEFAULT (datetime('now'))
   );
 
-  -- ──────────────────────────────────────────────────────────────────────────
-  --  2. CURRENT_SESSION — multi-appareil
-  --     Une ligne par (utilisateur × appareil).
-  --     device_id : 'web' | 'mobile' | 'pwa'
-  --     op_token stocké CHIFFRÉ (format "iv:tag:ciphertext").
-  -- ──────────────────────────────────────────────────────────────────────────
   CREATE TABLE IF NOT EXISTS current_session (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     op_user_id    INTEGER NOT NULL REFERENCES users(op_user_id),
@@ -76,50 +63,54 @@ db.exec(`
     UNIQUE (op_user_id, device_id)
   );
 
-  -- ──────────────────────────────────────────────────────────────────────────
-  --  3. PROJECTS_META
-  -- ──────────────────────────────────────────────────────────────────────────
   CREATE TABLE IF NOT EXISTS projects_meta (
-    op_project_id  INTEGER PRIMARY KEY,
-    start_date     TEXT,
-    end_date       TEXT,
-    workload       REAL,
-    progress       INTEGER NOT NULL DEFAULT 0 CHECK (progress BETWEEN 0 AND 100),
-    risk_score     REAL    NOT NULL DEFAULT 0 CHECK (risk_score BETWEEN 0 AND 100),
-    late_tasks     INTEGER NOT NULL DEFAULT 0,
-    blocked_tasks  INTEGER NOT NULL DEFAULT 0,
-    ai_summary     TEXT,
-    budget_total   REAL,
-    updated_at     TEXT    NOT NULL DEFAULT (datetime('now'))
+    op_project_id          INTEGER PRIMARY KEY,
+    start_date             TEXT,
+    end_date               TEXT,
+    workload               REAL,
+    progress               INTEGER NOT NULL DEFAULT 0 CHECK (progress BETWEEN 0 AND 100),
+    risk_score             REAL    NOT NULL DEFAULT 0 CHECK (risk_score BETWEEN 0 AND 100),
+    late_tasks             INTEGER NOT NULL DEFAULT 0,
+    blocked_tasks          INTEGER NOT NULL DEFAULT 0,
+    ai_summary             TEXT,
+    budget_total           REAL,
+    estimates_complete     INTEGER NOT NULL DEFAULT 1,
+    missing_estimates      INTEGER NOT NULL DEFAULT 0,
+    risk_is_partial        INTEGER NOT NULL DEFAULT 0,
+    budget_alerted_warning INTEGER NOT NULL DEFAULT 0,
+    budget_alerted_danger  INTEGER NOT NULL DEFAULT 0,
+    updated_at             TEXT    NOT NULL DEFAULT (datetime('now'))
   );
 
-  -- ──────────────────────────────────────────────────────────────────────────
-  --  4. PROJECT_MEMBERS
-  -- ──────────────────────────────────────────────────────────────────────────
   CREATE TABLE IF NOT EXISTS project_members (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     op_user_id     INTEGER NOT NULL REFERENCES users(op_user_id),
     op_project_id  INTEGER NOT NULL,
     role           TEXT    NOT NULL DEFAULT 'member' CHECK (role IN ('manager', 'member')),
-    hourly_rate    REAL,
     joined_at      TEXT    NOT NULL DEFAULT (datetime('now')),
     UNIQUE (op_user_id, op_project_id)
   );
 
-  -- ──────────────────────────────────────────────────────────────────────────
-  --  5. TASK_EXTENSIONS
-  -- ──────────────────────────────────────────────────────────────────────────
+  -- ─────────────────────────────────────────────────────────────────────────
+  --  task_extensions — table centrale du budget
+  --
+  --  estimated_hours  : fixé par le chef de projet
+  --  member_rate      : taux horaire déclaré par le membre pour CETTE tâche
+  --  estimated_cost   : calculé = estimated_hours × member_rate
+  --  actual_cost      : calculé = SUM(time_logs.hours_worked × rate_snapshot)
+  --  op_project_id    : pour filtrer les tâches par projet efficacement
+  -- ─────────────────────────────────────────────────────────────────────────
   CREATE TABLE IF NOT EXISTS task_extensions (
     op_task_id      INTEGER PRIMARY KEY,
+    op_project_id   INTEGER,
     is_blocked      INTEGER NOT NULL DEFAULT 0 CHECK (is_blocked IN (0, 1)),
+    estimated_hours REAL,
+    member_rate     REAL,
     estimated_cost  REAL,
     actual_cost     REAL,
     updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
   );
 
-  -- ──────────────────────────────────────────────────────────────────────────
-  --  6. TASK_DEPENDENCIES
-  -- ──────────────────────────────────────────────────────────────────────────
   CREATE TABLE IF NOT EXISTS task_dependencies (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     task_op_id             INTEGER NOT NULL,
@@ -128,9 +119,14 @@ db.exec(`
     CHECK (task_op_id != depends_on_task_op_id)
   );
 
-  -- ──────────────────────────────────────────────────────────────────────────
-  --  7. TIME_LOGS
-  -- ──────────────────────────────────────────────────────────────────────────
+  -- ─────────────────────────────────────────────────────────────────────────
+  --  time_logs
+  --
+  --  rate_snapshot : taux horaire capturé AU MOMENT du log.
+  --                  Protège l'historique si member_rate change plus tard.
+  --                  COALESCE(rate_snapshot, member_rate_courant) utilisé
+  --                  en fallback pour les anciens logs sans snapshot.
+  -- ─────────────────────────────────────────────────────────────────────────
   CREATE TABLE IF NOT EXISTS time_logs (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     op_task_id    INTEGER NOT NULL,
@@ -138,22 +134,16 @@ db.exec(`
     hours_worked  REAL    NOT NULL CHECK (hours_worked > 0),
     logged_date   TEXT    NOT NULL DEFAULT (date('now')),
     note          TEXT,
-    hourly_rate   REAL,    
+    rate_snapshot REAL,
     created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
   );
 
-  -- ──────────────────────────────────────────────────────────────────────────
-  --  8. NOTIFICATION_SETTINGS
-  -- ──────────────────────────────────────────────────────────────────────────
   CREATE TABLE IF NOT EXISTS notification_settings (
     op_user_id     INTEGER PRIMARY KEY REFERENCES users(op_user_id),
     enabled        INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
     reminder_days  INTEGER NOT NULL DEFAULT 3
   );
 
-  -- ──────────────────────────────────────────────────────────────────────────
-  --  9. NOTIFICATIONS
-  -- ──────────────────────────────────────────────────────────────────────────
   CREATE TABLE IF NOT EXISTS notifications (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     op_user_id  INTEGER NOT NULL REFERENCES users(op_user_id),
@@ -166,9 +156,6 @@ db.exec(`
     created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
   );
 
-  -- ──────────────────────────────────────────────────────────────────────────
-  --  10. AI_REPORTS
-  -- ──────────────────────────────────────────────────────────────────────────
   CREATE TABLE IF NOT EXISTS ai_reports (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     op_project_id  INTEGER NOT NULL,
@@ -176,9 +163,6 @@ db.exec(`
     created_at     TEXT    NOT NULL DEFAULT (datetime('now'))
   );
 
-  -- ──────────────────────────────────────────────────────────────────────────
-  --  11. OFFLINE_CHANGES
-  -- ──────────────────────────────────────────────────────────────────────────
   CREATE TABLE IF NOT EXISTS offline_changes (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     entity_type   TEXT    NOT NULL CHECK (entity_type IN ('task', 'project')),
@@ -189,12 +173,10 @@ db.exec(`
       CHECK (synced IN ('pending', 'done', 'error'))
   );
 
-  -- ══════════════════════════════════════════════════════════════════════════
-  --  INDEX
-  -- ══════════════════════════════════════════════════════════════════════════
   CREATE INDEX IF NOT EXISTS idx_session_user         ON current_session(op_user_id);
   CREATE INDEX IF NOT EXISTS idx_project_members_proj ON project_members(op_project_id);
   CREATE INDEX IF NOT EXISTS idx_project_members_user ON project_members(op_user_id);
+  CREATE INDEX IF NOT EXISTS idx_task_ext_project     ON task_extensions(op_project_id);
   CREATE INDEX IF NOT EXISTS idx_task_deps_task       ON task_dependencies(task_op_id);
   CREATE INDEX IF NOT EXISTS idx_task_deps_depends    ON task_dependencies(depends_on_task_op_id);
   CREATE INDEX IF NOT EXISTS idx_time_logs_task       ON time_logs(op_task_id);
@@ -204,6 +186,37 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_offline_synced       ON offline_changes(synced);
 
 `);
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  MIGRATIONS — colonnes ajoutées progressivement (protégées par try/catch)
+// ══════════════════════════════════════════════════════════════════════════════
+
+const migrations = [
+  // projects_meta
+  `ALTER TABLE projects_meta ADD COLUMN estimates_complete     INTEGER NOT NULL DEFAULT 1`,
+  `ALTER TABLE projects_meta ADD COLUMN missing_estimates      INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE projects_meta ADD COLUMN risk_is_partial        INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE projects_meta ADD COLUMN budget_alerted_warning INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE projects_meta ADD COLUMN budget_alerted_danger  INTEGER NOT NULL DEFAULT 0`,
+
+  // task_extensions — nouvelles colonnes du modèle budget
+  `ALTER TABLE task_extensions ADD COLUMN op_project_id   INTEGER`,
+  `ALTER TABLE task_extensions ADD COLUMN estimated_hours REAL`,
+  `ALTER TABLE task_extensions ADD COLUMN member_rate     REAL`,
+
+  // ── CORRECTION CRITIQUE : snapshot du taux au moment du log ──────────────
+  // Protège l'historique financier si member_rate change ultérieurement.
+  // Les anciens logs auront rate_snapshot = NULL → fallback sur member_rate courant.
+  `ALTER TABLE time_logs ADD COLUMN rate_snapshot REAL`,
+
+  // project_members — suppression hourly_rate (remplacé par member_rate dans task_extensions)
+  // SQLite ne supporte pas DROP COLUMN avant 3.35 — on laisse la colonne si elle existe
+  // Elle sera simplement ignorée dans le code
+];
+
+for (const sql of migrations) {
+  try { db.prepare(sql).run(); } catch (_) { /* colonne déjà existante */ }
+}
 
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -232,17 +245,9 @@ function getAllUsers() {
 
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  CURRENT SESSION — multi-appareil (web / mobile / pwa)
+//  CURRENT SESSION — multi-appareil
 // ══════════════════════════════════════════════════════════════════════════════
 
-/**
- * Sauvegarde ou met à jour la session d'un utilisateur sur un appareil.
- * Le op_token est chiffré avant d'être stocké.
- *
- * @param {number} opUserId
- * @param {{ opToken, fcmToken?, isAdmin?, deviceId? }} opts
- *   deviceId : 'web' | 'mobile' | 'pwa'  (défaut = 'web')
- */
 function saveSession(opUserId, { opToken, fcmToken = null, isAdmin = false, deviceId = "web" }) {
   const encryptedToken = encryptToken(opToken);
   db.prepare(`
@@ -256,71 +261,32 @@ function saveSession(opUserId, { opToken, fcmToken = null, isAdmin = false, devi
   `).run(opUserId, encryptedToken, fcmToken, isAdmin ? 1 : 0, deviceId);
 }
 
-/**
- * Retourne la session la plus récente d'un utilisateur (tous appareils).
- * Le op_token retourné est déjà DÉCHIFFRÉ.
- *
- * @param {number} opUserId
- * @param {string} [deviceId]  — si fourni, filtre par appareil spécifique
- * @returns {object|null}
- */
 function getSessionByUser(opUserId, deviceId = null) {
   const row = deviceId
-    ? db.prepare(`
-        SELECT * FROM current_session
-        WHERE op_user_id = ? AND device_id = ?
-      `).get(opUserId, deviceId)
-    : db.prepare(`
-        SELECT * FROM current_session
-        WHERE op_user_id = ?
-        ORDER BY last_login_at DESC
-        LIMIT 1
-      `).get(opUserId);
+    ? db.prepare(`SELECT * FROM current_session WHERE op_user_id = ? AND device_id = ?`).get(opUserId, deviceId)
+    : db.prepare(`SELECT * FROM current_session WHERE op_user_id = ? ORDER BY last_login_at DESC LIMIT 1`).get(opUserId);
 
   if (!row) return null;
-
   try {
     return { ...row, op_token: decryptToken(row.op_token) };
   } catch {
-    // Token corrompu ou clé changée — session invalide
     return null;
   }
 }
 
-/**
- * Retourne toutes les sessions actives d'un utilisateur (tous appareils).
- * Utile pour afficher "connecté sur X appareils".
- *
- * @param {number} opUserId
- * @returns {object[]}
- */
 function getAllSessionsByUser(opUserId) {
   return db.prepare(`
     SELECT id, op_user_id, fcm_token, is_admin, device_id, last_login_at
-    FROM current_session
-    WHERE op_user_id = ?
+    FROM current_session WHERE op_user_id = ?
     ORDER BY last_login_at DESC
   `).all(opUserId);
-  // On ne retourne PAS op_token ici — jamais exposer les tokens chiffrés inutilement
 }
 
-/**
- * Supprime la session d'un utilisateur sur un appareil spécifique (logout).
- * Si deviceId est omis, supprime TOUTES les sessions (logout global).
- *
- * @param {number} opUserId
- * @param {string} [deviceId]
- */
 function clearSession(opUserId, deviceId = null) {
   if (deviceId) {
-    db.prepare(`
-      DELETE FROM current_session WHERE op_user_id = ? AND device_id = ?
-    `).run(opUserId, deviceId);
+    db.prepare(`DELETE FROM current_session WHERE op_user_id = ? AND device_id = ?`).run(opUserId, deviceId);
   } else {
-    // Logout global — déconnecte tous les appareils
-    db.prepare(`
-      DELETE FROM current_session WHERE op_user_id = ?
-    `).run(opUserId);
+    db.prepare(`DELETE FROM current_session WHERE op_user_id = ?`).run(opUserId);
   }
 }
 
@@ -332,35 +298,76 @@ function clearSession(opUserId, deviceId = null) {
 function upsertProjectMeta(opProjectId, {
   startDate, endDate, workload,
   progress = 0, riskScore = 0, lateTasks = 0, blockedTasks = 0,
-  aiSummary = null, budgetTotal = null
+  aiSummary = null, budgetTotal = null,
+  estimatesComplete = true,
+  missingEstimates  = 0,
+  riskIsPartial     = false,
 }) {
+  // Préserve les flags d'alerte budget existants — ne jamais les écraser ici
+  const existing       = db.prepare(`SELECT budget_alerted_warning, budget_alerted_danger FROM projects_meta WHERE op_project_id = ?`).get(opProjectId);
+  const alertedWarning = existing?.budget_alerted_warning ?? 0;
+  const alertedDanger  = existing?.budget_alerted_danger  ?? 0;
+
   db.prepare(`
     INSERT INTO projects_meta (
       op_project_id, start_date, end_date, workload,
       progress, risk_score, late_tasks, blocked_tasks,
-      ai_summary, budget_total, updated_at
+      ai_summary, budget_total,
+      estimates_complete, missing_estimates, risk_is_partial,
+      budget_alerted_warning, budget_alerted_danger,
+      updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     ON CONFLICT(op_project_id) DO UPDATE SET
-      start_date    = excluded.start_date,
-      end_date      = excluded.end_date,
-      workload      = excluded.workload,
-      progress      = excluded.progress,
-      risk_score    = excluded.risk_score,
-      late_tasks    = excluded.late_tasks,
-      blocked_tasks = excluded.blocked_tasks,
-      ai_summary    = excluded.ai_summary,
-      budget_total  = excluded.budget_total,
-      updated_at    = excluded.updated_at
+      start_date             = excluded.start_date,
+      end_date               = excluded.end_date,
+      workload               = excluded.workload,
+      progress               = excluded.progress,
+      risk_score             = excluded.risk_score,
+      late_tasks             = excluded.late_tasks,
+      blocked_tasks          = excluded.blocked_tasks,
+      ai_summary             = excluded.ai_summary,
+      budget_total           = excluded.budget_total,
+      estimates_complete     = excluded.estimates_complete,
+      missing_estimates      = excluded.missing_estimates,
+      risk_is_partial        = excluded.risk_is_partial,
+      budget_alerted_warning = excluded.budget_alerted_warning,
+      budget_alerted_danger  = excluded.budget_alerted_danger,
+      updated_at             = excluded.updated_at
   `).run(
     opProjectId,
-    startDate    || null,
-    endDate      || null,
-    workload     != null ? Number(workload) : null,
+    startDate   || null,
+    endDate     || null,
+    workload    != null ? Number(workload)    : null,
     progress, riskScore, lateTasks, blockedTasks,
     aiSummary,
-    budgetTotal  != null ? Number(budgetTotal) : null
+    budgetTotal != null ? Number(budgetTotal) : null,
+    estimatesComplete ? 1 : 0,
+    missingEstimates,
+    riskIsPartial ? 1 : 0,
+    alertedWarning,
+    alertedDanger,
   );
+}
+
+function setBudgetAlertedFlags(opProjectId, { warning = false, danger = false }) {
+  db.prepare(`
+    UPDATE projects_meta
+    SET budget_alerted_warning = ?,
+        budget_alerted_danger  = ?,
+        updated_at             = datetime('now')
+    WHERE op_project_id = ?
+  `).run(warning ? 1 : 0, danger ? 1 : 0, opProjectId);
+}
+
+function resetBudgetAlertedFlags(opProjectId) {
+  db.prepare(`
+    UPDATE projects_meta
+    SET budget_alerted_warning = 0,
+        budget_alerted_danger  = 0,
+        updated_at             = datetime('now')
+    WHERE op_project_id = ?
+  `).run(opProjectId);
 }
 
 function getProjectMeta(opProjectId) {
@@ -388,16 +395,16 @@ function deleteProjectMeta(opProjectId) {
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  PROJECT MEMBERS
+//  NOTE : hourly_rate retiré — le taux est maintenant dans task_extensions
 // ══════════════════════════════════════════════════════════════════════════════
 
-function upsertProjectMember(opUserId, opProjectId, { role = "member", hourlyRate = null }) {
+function upsertProjectMember(opUserId, opProjectId, { role = "member" }) {
   db.prepare(`
-    INSERT INTO project_members (op_user_id, op_project_id, role, hourly_rate)
-    VALUES (?, ?, ?, ?)
+    INSERT INTO project_members (op_user_id, op_project_id, role)
+    VALUES (?, ?, ?)
     ON CONFLICT(op_user_id, op_project_id) DO UPDATE SET
-      role        = excluded.role,
-      hourly_rate = excluded.hourly_rate
-  `).run(opUserId, opProjectId, role, hourlyRate != null ? Number(hourlyRate) : null);
+      role = excluded.role
+  `).run(opUserId, opProjectId, role);
 }
 
 function getProjectMembers(opProjectId) {
@@ -412,7 +419,7 @@ function getProjectMembers(opProjectId) {
 
 function getMemberRole(opUserId, opProjectId) {
   return db.prepare(`
-    SELECT role, hourly_rate
+    SELECT role
     FROM project_members
     WHERE op_user_id = ? AND op_project_id = ?
   `).get(opUserId, opProjectId);
@@ -427,18 +434,116 @@ function removeProjectMember(opUserId, opProjectId) {
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  TASK EXTENSIONS
+//
+//  Logique budget :
+//    1. Le chef fixe estimated_hours
+//    2. Le membre fixe member_rate (taux pour CETTE tâche uniquement)
+//    3. estimated_cost = estimated_hours × member_rate  (recalculé auto)
+//    4. actual_cost    = SUM(time_logs.hours_worked × rate_snapshot)
 // ══════════════════════════════════════════════════════════════════════════════
 
-function upsertTaskExtension(opTaskId, { isBlocked = false, estimatedCost = null, actualCost = null }) {
+function upsertTaskExtension(opTaskId, {
+  opProjectId   = null,
+  isBlocked     = false,
+  estimatedHours = null,
+  memberRate    = null,
+}) {
+  // Récupère les valeurs actuelles pour ne pas écraser ce qui existe
+  const existing = db.prepare(
+    `SELECT estimated_hours, member_rate FROM task_extensions WHERE op_task_id = ?`
+  ).get(opTaskId);
+
+  const finalEstimatedHours = estimatedHours != null ? Number(estimatedHours) : (existing?.estimated_hours ?? null);
+  const finalMemberRate     = memberRate     != null ? Number(memberRate)     : (existing?.member_rate     ?? null);
+
+  // Calcul automatique du coût estimé si les deux valeurs sont connues
+  const estimatedCost = (finalEstimatedHours != null && finalMemberRate != null)
+    ? Math.round(finalEstimatedHours * finalMemberRate * 100) / 100
+    : null;
+
   db.prepare(`
-    INSERT INTO task_extensions (op_task_id, is_blocked, estimated_cost, actual_cost, updated_at)
+    INSERT INTO task_extensions
+      (op_task_id, op_project_id, is_blocked, estimated_hours, member_rate, estimated_cost, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+    ON CONFLICT(op_task_id) DO UPDATE SET
+      op_project_id   = COALESCE(excluded.op_project_id, op_project_id),
+      is_blocked      = excluded.is_blocked,
+      estimated_hours = excluded.estimated_hours,
+      member_rate     = excluded.member_rate,
+      estimated_cost  = excluded.estimated_cost,
+      updated_at      = excluded.updated_at
+  `).run(
+    opTaskId,
+    opProjectId,
+    isBlocked ? 1 : 0,
+    finalEstimatedHours,
+    finalMemberRate,
+    estimatedCost,
+  );
+}
+
+/**
+ * Chef de projet — fixe les heures estimées d'une tâche.
+ * Recalcule estimated_cost si member_rate est déjà défini.
+ */
+function setEstimatedHours(opTaskId, estimatedHours, opProjectId = null) {
+  const hours    = Number(estimatedHours);
+  const existing = db.prepare(
+    `SELECT member_rate, op_project_id FROM task_extensions WHERE op_task_id = ?`
+  ).get(opTaskId);
+
+  const memberRate     = existing?.member_rate ?? null;
+  const estimatedCost  = (memberRate != null)
+    ? Math.round(hours * memberRate * 100) / 100
+    : null;
+  const finalProjectId = opProjectId ?? existing?.op_project_id ?? null;
+
+  db.prepare(`
+    INSERT INTO task_extensions (op_task_id, op_project_id, estimated_hours, estimated_cost, updated_at)
     VALUES (?, ?, ?, ?, datetime('now'))
     ON CONFLICT(op_task_id) DO UPDATE SET
-      is_blocked     = excluded.is_blocked,
+      op_project_id   = COALESCE(excluded.op_project_id, op_project_id),
+      estimated_hours = excluded.estimated_hours,
+      estimated_cost  = excluded.estimated_cost,
+      updated_at      = excluded.updated_at
+  `).run(opTaskId, finalProjectId, hours, estimatedCost);
+}
+
+/**
+ * Membre — déclare son taux horaire pour cette tâche.
+ * Recalcule estimated_cost et actual_cost immédiatement.
+ *
+ * IMPORTANT : actual_cost est recalculé en utilisant rate_snapshot de chaque
+ * log existant (COALESCE avec le nouveau taux en fallback pour les anciens logs).
+ * Les nouveaux logs utiliseront ce taux comme snapshot dès leur création.
+ */
+function setMemberRate(opTaskId, memberRate, opProjectId = null) {
+  const rate     = Number(memberRate);
+  const existing = db.prepare(
+    `SELECT estimated_hours, op_project_id FROM task_extensions WHERE op_task_id = ?`
+  ).get(opTaskId);
+
+  const estimatedHours = existing?.estimated_hours ?? null;
+  const estimatedCost  = (estimatedHours != null)
+    ? Math.round(estimatedHours * rate * 100) / 100
+    : null;
+  const finalProjectId = opProjectId ?? existing?.op_project_id ?? null;
+
+  db.prepare(`
+    INSERT INTO task_extensions
+      (op_task_id, op_project_id, member_rate, estimated_cost, updated_at)
+    VALUES (?, ?, ?, ?, datetime('now'))
+    ON CONFLICT(op_task_id) DO UPDATE SET
+      op_project_id  = COALESCE(excluded.op_project_id, op_project_id),
+      member_rate    = excluded.member_rate,
       estimated_cost = excluded.estimated_cost,
-      actual_cost    = excluded.actual_cost,
       updated_at     = excluded.updated_at
-  `).run(opTaskId, isBlocked ? 1 : 0, estimatedCost, actualCost);
+  `).run(opTaskId, finalProjectId, rate, estimatedCost);
+
+  // Recalcule actual_cost en respectant les snapshots historiques.
+  // Les logs avec rate_snapshot gardent leur taux d'origine.
+  // Les anciens logs sans snapshot utilisent le nouveau taux en fallback.
+  refreshActualCost(opTaskId);
 }
 
 function getTaskExtension(opTaskId) {
@@ -452,19 +557,53 @@ function setTaskBlocked(opTaskId, isBlocked) {
   `).run(isBlocked ? 1 : 0, opTaskId);
 }
 
+/**
+ * Recalcule actual_cost après ajout/suppression d'un time_log.
+ *
+ * Formule :
+ *   actual_cost = SUM(hours_worked × COALESCE(rate_snapshot, member_rate_courant))
+ *
+ * - rate_snapshot : taux figé au moment de la saisie (protège l'historique)
+ * - fallback member_rate : pour les anciens logs sans snapshot
+ * - Si aucun taux n'est disponible → actual_cost reste null
+ */
 function refreshActualCost(opTaskId) {
-  const result = db.prepare(`
-    SELECT SUM(hours_worked * hourly_rate) AS total
+  const ext = db.prepare(
+    `SELECT member_rate FROM task_extensions WHERE op_task_id = ?`
+  ).get(opTaskId);
+
+  // Pas d'extension du tout → rien à faire
+  if (!ext) return;
+
+  const currentRate = ext.member_rate ?? 0;
+
+  // SUM utilise rate_snapshot si présent, sinon member_rate courant en fallback.
+  // Si ni snapshot ni taux courant → la ligne contribue 0 (pas de coût calculable).
+  const row = db.prepare(`
+    SELECT COALESCE(SUM(hours_worked * COALESCE(rate_snapshot, ?)), 0) AS total
     FROM time_logs
-    WHERE op_task_id = ? AND hourly_rate IS NOT NULL
+    WHERE op_task_id = ?
+  `).get(currentRate, opTaskId);
+
+  // Si member_rate est null ET aucun log n'a de snapshot → actual_cost = null
+  const hasAnyRate = ext.member_rate != null || db.prepare(`
+    SELECT 1 FROM time_logs WHERE op_task_id = ? AND rate_snapshot IS NOT NULL LIMIT 1
   `).get(opTaskId);
+
+  if (!hasAnyRate) {
+    // Pas de taux du tout → on ne stocke rien (reste null)
+    return;
+  }
+
+  const actualCost = Math.round(Number(row?.total ?? 0) * 100) / 100;
 
   db.prepare(`
     UPDATE task_extensions
     SET actual_cost = ?, updated_at = datetime('now')
     WHERE op_task_id = ?
-  `).run(result?.total ?? 0, opTaskId);
+  `).run(actualCost, opTaskId);
 }
+
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  TASK DEPENDENCIES
@@ -499,19 +638,35 @@ function getDependents(taskOpId) {
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  TIME LOGS
+//
+//  CORRECTION CRITIQUE — rate_snapshot :
+//    Le taux membre est capturé au moment de la saisie depuis task_extensions.
+//    Si member_rate change plus tard, les anciens logs conservent leur coût
+//    d'origine grâce au snapshot. Les nouveaux logs utilisent le taux actuel.
 // ══════════════════════════════════════════════════════════════════════════════
 
-function addTimeLog(opTaskId, opUserId, { hoursWorked, loggedDate = null, note = null, hourlyRate = null }) {
+function addTimeLog(opTaskId, opUserId, { hoursWorked, loggedDate = null, note = null }) {
+  // Capture du taux courant au moment de la saisie
+  const ext          = db.prepare(
+    `SELECT member_rate FROM task_extensions WHERE op_task_id = ?`
+  ).get(opTaskId);
+  const rateSnapshot = ext?.member_rate ?? null;
+
   const result = db.prepare(`
-    INSERT INTO time_logs (op_task_id, op_user_id, hours_worked, logged_date, note, hourly_rate)
+    INSERT INTO time_logs (op_task_id, op_user_id, hours_worked, logged_date, note, rate_snapshot)
     VALUES (?, ?, ?, ?, ?, ?)
   `).run(
-    opTaskId, opUserId,
+    opTaskId,
+    opUserId,
     Number(hoursWorked),
     loggedDate || new Date().toISOString().slice(0, 10),
     note || null,
-    hourlyRate != null ? Number(hourlyRate) : null   // ← AJOUTE ÇA
+    rateSnapshot,
   );
+
+  // Recalcul automatique du coût réel après chaque log
+  refreshActualCost(opTaskId);
+
   return result.lastInsertRowid;
 }
 
@@ -532,7 +687,10 @@ function getTimeLogsForUser(opUserId) {
 }
 
 function deleteTimeLog(id) {
+  // Récupère le taskId avant suppression pour recalculer après
+  const log = db.prepare(`SELECT op_task_id FROM time_logs WHERE id = ?`).get(id);
   db.prepare(`DELETE FROM time_logs WHERE id = ?`).run(id);
+  if (log) refreshActualCost(log.op_task_id);
 }
 
 
@@ -551,9 +709,7 @@ function upsertNotificationSettings(opUserId, { enabled = true, reminderDays = 3
 }
 
 function getNotificationSettings(opUserId) {
-  return db.prepare(`
-    SELECT * FROM notification_settings WHERE op_user_id = ?
-  `).get(opUserId);
+  return db.prepare(`SELECT * FROM notification_settings WHERE op_user_id = ?`).get(opUserId);
 }
 
 
@@ -563,7 +719,7 @@ function getNotificationSettings(opUserId) {
 
 const VALID_NOTIF_TYPES = [
   "assigned", "due_soon", "overdue",
-  "blocked", "unblocked", "danger", "budget_alert"
+  "blocked", "unblocked", "danger", "budget_alert",
 ];
 
 function createNotification(opUserId, type, message) {
@@ -654,66 +810,38 @@ module.exports = {
   db,
 
   // Users
-  upsertUser,
-  getUserById,
-  getAllUsers,
+  upsertUser, getUserById, getAllUsers,
 
-  // Session — multi-appareil
-  saveSession,
-  getSessionByUser,
-  getAllSessionsByUser,
-  clearSession,
+  // Session
+  saveSession, getSessionByUser, getAllSessionsByUser, clearSession,
 
   // Projects meta
-  upsertProjectMeta,
-  getProjectMeta,
-  getAllProjectsMeta,
-  getProjectManager,
-  deleteProjectMeta,
+  upsertProjectMeta, getProjectMeta, getAllProjectsMeta,
+  getProjectManager, deleteProjectMeta,
+  setBudgetAlertedFlags, resetBudgetAlertedFlags,
 
   // Project members
-  upsertProjectMember,
-  getProjectMembers,
-  getMemberRole,
-  removeProjectMember,
+  upsertProjectMember, getProjectMembers, getMemberRole, removeProjectMember,
 
   // Task extensions
-  upsertTaskExtension,
-  getTaskExtension,
-  setTaskBlocked,
-  refreshActualCost,
+  upsertTaskExtension, getTaskExtension, setTaskBlocked,
+  setEstimatedHours, setMemberRate, refreshActualCost,
 
   // Task dependencies
-  addDependency,
-  removeDependency,
-  getDependenciesOf,
-  getDependents,
+  addDependency, removeDependency, getDependenciesOf, getDependents,
 
   // Time logs
-  addTimeLog,
-  getTimeLogsForTask,
-  getTimeLogsForUser,
-  deleteTimeLog,
+  addTimeLog, getTimeLogsForTask, getTimeLogsForUser, deleteTimeLog,
 
   // Notification settings
-  upsertNotificationSettings,
-  getNotificationSettings,
+  upsertNotificationSettings, getNotificationSettings,
 
   // Notifications
-  createNotification,
-  getNotifications,
-  markNotificationRead,
-  markAllNotificationsRead,
+  createNotification, getNotifications, markNotificationRead, markAllNotificationsRead,
 
   // AI reports
-  saveAiReport,
-  getAiReports,
-  getLatestAiReport,
+  saveAiReport, getAiReports, getLatestAiReport,
 
   // Offline changes
-  queueOfflineChange,
-  getPendingChanges,
-  markChangeSynced,
-  markChangeError,
-  clearSyncedChanges,
+  queueOfflineChange, getPendingChanges, markChangeSynced, markChangeError, clearSyncedChanges,
 };

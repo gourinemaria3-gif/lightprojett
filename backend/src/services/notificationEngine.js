@@ -1,26 +1,16 @@
 "use strict";
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  notificationEngine.js
+//  notificationEngine.js (v3)
 //
-//  RÈGLES PAR RÔLE :
-//
-//  MEMBRE
-//    In-app  : assignée, bloquée, débloquée, en retard, deadline proche
-//    Push    : en retard, deadline proche  (urgents seulement)
-//    Email   : CRON selon préférence (résumé retards + deadlines)
-//
-//  CHEF DE PROJET  (peut aussi être membre d'un autre projet)
-//    In-app  : idem membre pour SES tâches personnelles
-//              + résumé fin de journée "N tâches en retard / bloquées" (CRON 23h)
-//              + projet en danger, budget warning/critique
-//    Push    : projet en danger, budget (warning + critique)
-//    Email   : idem membre + rapport hebdomadaire
-//
-//  ADMIN
-//    In-app  : projet en danger, budget critique seulement
-//    Push    : projet en danger, budget critique + warning
-//    Email   : rapport hebdomadaire uniquement
+//  CORRECTIONS :
+//    1. PUSH sets corrigés — chaque rôle reçoit ce qui le concerne :
+//         MEMBRE  : assigned, due_soon, overdue, blocked, unblocked
+//         MANAGER : danger, budget_alert + blocked/unblocked si tâche non assignée
+//         ADMIN   : danger, budget_alert
+//    2. notifyTaskBlocked / notifyTaskUnblocked — notifie le MANAGER
+//       si la tâche n'a pas d'assignee
+//    3. Anti-spam fiable sur toutes les fonctions
 // ══════════════════════════════════════════════════════════════════════════════
 
 const {
@@ -42,11 +32,13 @@ const NOTIF_TYPES = {
   BUDGET_ALERT: "budget_alert",
 };
 
-// Push par rôle — chaque rôle a son propre ensemble de types urgents
-const PUSH_MEMBER  = new Set(["overdue", "due_soon"]);
-const PUSH_MANAGER = new Set(["danger", "budget_alert"]);
+// ── Quels types déclenchent un push selon le rôle ────────────────────────────
+// MEMBRE reçoit les notifs qui concernent SES tâches
+const PUSH_MEMBER  = new Set(["assigned", "due_soon", "overdue", "blocked", "unblocked"]);
+// MANAGER reçoit les alertes projet + budget + blocage de tâches non assignées
+const PUSH_MANAGER = new Set(["danger", "budget_alert", "blocked", "unblocked"]);
+// ADMIN reçoit uniquement les alertes critiques
 const PUSH_ADMIN   = new Set(["danger", "budget_alert"]);
-const PUSH_NONE    = new Set();
 
 const CRITICAL_SUBTYPES = new Set(["project_critical", "budget_critical"]);
 
@@ -87,42 +79,48 @@ function getUserPrefs(opUserId) {
 }
 
 // ── Dispatcher central ────────────────────────────────────────────────────────
+// pushAllowed = le Set correspondant au rôle du destinataire
 async function _dispatch({
   opUserId,
   type,
   message,
   entityId,
-  pushAllowed,        // Set des types qui déclenchent un push pour ce rôle
-  subType   = null,   // sous-type pour email critique immédiat
-  emailOpts = null,   // { to, name, projectName } — email critique immédiat
-  skipDedup = false,  // true = bypass anti-spam (assignation explicite)
+  pushAllowed,
+  subType   = null,
+  emailOpts = null,
+  skipDedup = false,
 }) {
   const dedupKey = subType ? `${type}:${subType}` : type;
 
   if (!skipDedup) {
-    if (alreadySentToday(opUserId, dedupKey, entityId)) return;
+    if (alreadySentToday(opUserId, dedupKey, entityId)) {
+      console.log(`[NotifEngine] Anti-spam: (${dedupKey}) user=${opUserId} entity=${entityId} → ignorée`);
+      return;
+    }
     markSent(opUserId, dedupKey, entityId);
   }
 
   const prefs = getUserPrefs(opUserId);
 
-  // 1. In-app (toujours, sauf si createNotification lève une erreur)
+  // 1. In-app (toujours)
   try {
     createNotification(opUserId, type, message);
+    console.log(`[NotifEngine] In-app ✓ user=${opUserId} type=${type}`);
   } catch (err) {
-    console.warn(`[NotifEngine] in-app user ${opUserId}:`, err.message);
+    console.warn(`[NotifEngine] In-app erreur user ${opUserId}:`, err.message);
   }
 
-  // 2. Push — uniquement si le type est dans pushAllowed pour ce rôle
+  // 2. Push (si activé ET type autorisé pour ce rôle)
   if (prefs.push_enabled && pushAllowed.has(type)) {
     try {
       await sendPushToUser(opUserId, type, message, db);
+      console.log(`[NotifEngine] Push ✓ user=${opUserId} type=${type}`);
     } catch (err) {
-      console.warn(`[NotifEngine] push user ${opUserId}:`, err.message);
+      console.warn(`[NotifEngine] Push erreur user ${opUserId}:`, err.message);
     }
   }
 
-  // 3. Email critique immédiat (project_critical ou budget_critical)
+  // 3. Email critique immédiat (seulement pour project_critical et budget_critical)
   if (prefs.email_enabled && subType && CRITICAL_SUBTYPES.has(subType) && emailOpts?.to) {
     try {
       await sendCriticalAlert({
@@ -132,8 +130,9 @@ async function _dispatch({
         projectName: emailOpts.projectName || "Projet inconnu",
         detail:      message,
       });
+      console.log(`[NotifEngine] Email critique ✓ → ${emailOpts.to}`);
     } catch (err) {
-      console.warn(`[NotifEngine] email critique user ${opUserId}:`, err.message);
+      console.warn(`[NotifEngine] Email critique erreur user ${opUserId}:`, err.message);
     }
   }
 }
@@ -142,43 +141,74 @@ async function _dispatch({
 //  MEMBRE — tâches personnelles
 // ══════════════════════════════════════════════════════════════════════════════
 
-// Assignation : skipDedup=true (acte explicite), entityId unique par (tâche×personne)
+// Appelé quand une tâche est assignée à quelqu'un
 async function notifyTaskAssigned({ assigneeId, taskTitle, projectName, taskId }) {
   await _dispatch({
     opUserId:    assigneeId,
     type:        NOTIF_TYPES.ASSIGNED,
     message:     `Vous avez été assigné(e) à la tâche "${taskTitle}" dans ${projectName}.`,
     entityId:    `assigned:${taskId}:${assigneeId}`,
-    pushAllowed: PUSH_NONE,
-    skipDedup:   true,
-  });
-}
-
-// Tâche bloquée — notifie l'assignee (membre)
-async function notifyTaskBlockedMember({ taskId, taskTitle, blockedByTaskId, assigneeId }) {
-  if (!assigneeId) return;
-  await _dispatch({
-    opUserId:    assigneeId,
-    type:        NOTIF_TYPES.BLOCKED,
-    message:     `Votre tâche "${taskTitle}" est bloquée par la tâche #${blockedByTaskId}.`,
-    entityId:    `blocked:${taskId}:by:${blockedByTaskId}`,
     pushAllowed: PUSH_MEMBER,
+    skipDedup:   true, // une assignation = toujours notifier
   });
 }
 
-// Tâche débloquée — notifie l'assignee (membre)
-async function notifyTaskUnblockedMember({ taskId, taskTitle, assigneeId }) {
-  if (!assigneeId) return;
-  await _dispatch({
-    opUserId:    assigneeId,
-    type:        NOTIF_TYPES.UNBLOCKED,
-    message:     `Votre tâche "${taskTitle}" est débloquée — vous pouvez reprendre le travail.`,
-    entityId:    `unblocked:${taskId}`,
-    pushAllowed: PUSH_MEMBER,
-  });
+// Appelé quand une tâche est bloquée (dépendance non terminée)
+// → notifie le membre assigné, OU le manager si la tâche est non assignée
+async function notifyTaskBlocked({ taskId, taskTitle, blockedByTaskId, assigneeId, projectId }) {
+  const entityId = `blocked:${taskId}:by:${blockedByTaskId}`;
+
+  if (assigneeId) {
+    // Notif membre
+    await _dispatch({
+      opUserId:    assigneeId,
+      type:        NOTIF_TYPES.BLOCKED,
+      message:     `Votre tâche "${taskTitle || `#${taskId}`}" est bloquée par la tâche #${blockedByTaskId}.`,
+      entityId,
+      pushAllowed: PUSH_MEMBER,
+    });
+  } else if (projectId) {
+    // Pas d'assignee → notifie le manager
+    const manager = getProjectManager(projectId);
+    if (manager) {
+      await _dispatch({
+        opUserId:    manager.op_user_id,
+        type:        NOTIF_TYPES.BLOCKED,
+        message:     `La tâche "#${taskId} — ${taskTitle || taskId}" est bloquée par la tâche #${blockedByTaskId} (tâche non assignée).`,
+        entityId,
+        pushAllowed: PUSH_MANAGER,
+      });
+    }
+  }
 }
 
-// Tâche en retard — notifie l'assignee (membre)
+// Appelé quand une tâche est débloquée
+async function notifyTaskUnblocked({ taskId, taskTitle, assigneeId, projectId }) {
+  const entityId = `unblocked:${taskId}`;
+
+  if (assigneeId) {
+    await _dispatch({
+      opUserId:    assigneeId,
+      type:        NOTIF_TYPES.UNBLOCKED,
+      message:     `Votre tâche "${taskTitle || `#${taskId}`}" est débloquée — vous pouvez reprendre le travail.`,
+      entityId,
+      pushAllowed: PUSH_MEMBER,
+    });
+  } else if (projectId) {
+    const manager = getProjectManager(projectId);
+    if (manager) {
+      await _dispatch({
+        opUserId:    manager.op_user_id,
+        type:        NOTIF_TYPES.UNBLOCKED,
+        message:     `La tâche "#${taskId} — ${taskTitle || taskId}" est maintenant débloquée (tâche non assignée).`,
+        entityId,
+        pushAllowed: PUSH_MANAGER,
+      });
+    }
+  }
+}
+
+// Appelé par le CRON pour les tâches en retard (envoi au membre assigné)
 async function notifyTaskOverdueMember({ opUserId, taskTitle, dueDate, taskId }) {
   await _dispatch({
     opUserId,
@@ -189,7 +219,7 @@ async function notifyTaskOverdueMember({ opUserId, taskTitle, dueDate, taskId })
   });
 }
 
-// Deadline proche — notifie l'assignee (membre)
+// Appelé par le CRON pour les deadlines proches (envoi au membre assigné)
 async function notifyDeadlineSoonMember({ opUserId, taskTitle, dueDate, taskId, daysLeft }) {
   await _dispatch({
     opUserId,
@@ -201,18 +231,12 @@ async function notifyDeadlineSoonMember({ opUserId, taskTitle, dueDate, taskId, 
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  CHEF DE PROJET — résumé global fin de journée
-//
-//  Appelé par le CRON à 23h00 avec les compteurs agrégés du projet.
-//  UNE seule notif résumé au lieu de N notifs individuelles.
+//  CHEF DE PROJET — résumés et alertes projet
 // ══════════════════════════════════════════════════════════════════════════════
+
+// Résumé quotidien envoyé au manager à 23h00
 async function notifyManagerDailySummary({
-  managerId,
-  projectId,
-  projectName,
-  overdueCount   = 0,
-  blockedCount   = 0,
-  unblockedCount = 0,
+  managerId, projectId, projectName, overdueCount = 0, blockedCount = 0, unblockedCount = 0,
 }) {
   if (overdueCount === 0 && blockedCount === 0 && unblockedCount === 0) return;
 
@@ -226,11 +250,11 @@ async function notifyManagerDailySummary({
     type:        NOTIF_TYPES.OVERDUE,
     message:     `Résumé du jour — ${projectName} : ${parts.join(", ")}.`,
     entityId:    `daily_summary:${projectId}`,
-    pushAllowed: PUSH_NONE, // résumé = pas urgent, pas de push
+    pushAllowed: PUSH_MANAGER,
   });
 }
 
-// ── Projet en danger — chef seulement ────────────────────────────────────────
+// Projet en danger (risque > 40) — envoyé uniquement au manager
 async function notifyProjectDanger({ projectId, projectName, riskScore, managerId }) {
   await _dispatch({
     opUserId:    managerId,
@@ -241,20 +265,21 @@ async function notifyProjectDanger({ projectId, projectName, riskScore, managerI
   });
 }
 
-// ── Projet critique — chef + admins (email critique immédiat) ─────────────────
+// Projet critique (risque > 70) — envoyé au manager ET aux admins, avec email
 async function notifyProjectCritical({
   projectId, projectName, riskScore,
   managerId, managerEmail, managerName,
   adminIds = [],
 }) {
   const message = `⚠️ Le projet "${projectName}" est en état CRITIQUE (score : ${riskScore}/100). Intervention requise.`;
+  const entityId = `critical:${projectId}`;
 
   const managerInfo = db.prepare(`SELECT name, email FROM users WHERE op_user_id = ?`).get(managerId);
   await _dispatch({
     opUserId:    managerId,
     type:        NOTIF_TYPES.DANGER,
     message,
-    entityId:    `critical:${projectId}`,
+    entityId,
     pushAllowed: PUSH_MANAGER,
     subType:     "project_critical",
     emailOpts:   {
@@ -264,6 +289,7 @@ async function notifyProjectCritical({
     },
   });
 
+  // Admins : push avec PUSH_ADMIN (uniquement danger + budget_alert)
   for (const adminId of adminIds) {
     if (adminId === managerId) continue;
     const adminInfo = db.prepare(`SELECT name, email FROM users WHERE op_user_id = ?`).get(adminId);
@@ -271,7 +297,7 @@ async function notifyProjectCritical({
       opUserId:    adminId,
       type:        NOTIF_TYPES.DANGER,
       message,
-      entityId:    `critical:${projectId}`,
+      entityId,
       pushAllowed: PUSH_ADMIN,
       subType:     "project_critical",
       emailOpts:   adminInfo ? { to: adminInfo.email, name: adminInfo.name, projectName } : null,
@@ -279,15 +305,20 @@ async function notifyProjectCritical({
   }
 }
 
-// ── Budget warning ≥ 80% — chef + admins in-app & push ───────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+//  BUDGET — alertes au manager + admins
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Budget > 80% — avertissement au manager + admins
 async function notifyBudgetWarning({ projectId, projectName, budgetPct, managerId, adminIds = [] }) {
-  const message = `Le budget du projet "${projectName}" est utilisé à ${budgetPct}% — surveillez les dépenses.`;
+  const message  = `Le budget du projet "${projectName}" est utilisé à ${budgetPct}% — surveillez les dépenses.`;
+  const entityId = `budget_warn:${projectId}`;
 
   await _dispatch({
     opUserId:    managerId,
     type:        NOTIF_TYPES.BUDGET_ALERT,
     message,
-    entityId:    `budget_warn:${projectId}`,
+    entityId,
     pushAllowed: PUSH_MANAGER,
   });
 
@@ -297,26 +328,27 @@ async function notifyBudgetWarning({ projectId, projectName, budgetPct, managerI
       opUserId:    adminId,
       type:        NOTIF_TYPES.BUDGET_ALERT,
       message,
-      entityId:    `budget_warn:${projectId}`,
+      entityId,
       pushAllowed: PUSH_ADMIN,
     });
   }
 }
 
-// ── Budget critique ≥ 100% — chef + admins (email critique immédiat) ──────────
+// Budget >= 100% — dépassement critique au manager (email immédiat) + admins
 async function notifyBudgetCritical({
   projectId, projectName, budgetPct,
   managerId, managerEmail, managerName,
   adminIds = [],
 }) {
-  const message = `💰 Le budget du projet "${projectName}" est dépassé à ${budgetPct}%. Action immédiate requise.`;
+  const message  = `💰 Le budget du projet "${projectName}" est dépassé à ${budgetPct}%. Action immédiate requise.`;
+  const entityId = `budget_critical:${projectId}`;
 
   const managerInfo = db.prepare(`SELECT name, email FROM users WHERE op_user_id = ?`).get(managerId);
   await _dispatch({
     opUserId:    managerId,
     type:        NOTIF_TYPES.BUDGET_ALERT,
     message,
-    entityId:    `budget_critical:${projectId}`,
+    entityId,
     pushAllowed: PUSH_MANAGER,
     subType:     "budget_critical",
     emailOpts:   {
@@ -333,7 +365,7 @@ async function notifyBudgetCritical({
       opUserId:    adminId,
       type:        NOTIF_TYPES.BUDGET_ALERT,
       message,
-      entityId:    `budget_critical:${projectId}`,
+      entityId,
       pushAllowed: PUSH_ADMIN,
       subType:     "budget_critical",
       emailOpts:   adminInfo ? { to: adminInfo.email, name: adminInfo.name, projectName } : null,
@@ -341,35 +373,27 @@ async function notifyBudgetCritical({
   }
 }
 
-// ── Aliases pour compatibilité avec l'ancien code ────────────────────────────
+// ── Aliases pour compatibilité (anciens imports) ──────────────────────────────
 const notifyTaskOverdue   = notifyTaskOverdueMember;
 const notifyDeadlineSoon  = notifyDeadlineSoonMember;
-const notifyTaskBlocked   = notifyTaskBlockedMember;
-const notifyTaskUnblocked = notifyTaskUnblockedMember;
 
 module.exports = {
   NOTIF_TYPES,
   getUserPrefs,
-
-  // Membre
   notifyTaskAssigned,
-  notifyTaskBlockedMember,
-  notifyTaskUnblockedMember,
+  notifyTaskBlocked,
+  notifyTaskUnblocked,
   notifyTaskOverdueMember,
   notifyDeadlineSoonMember,
-
-  // Chef
   notifyManagerDailySummary,
   notifyProjectDanger,
   notifyProjectCritical,
-
-  // Budget
   notifyBudgetWarning,
   notifyBudgetCritical,
-
-  // Aliases compat
+  // aliases
   notifyTaskOverdue,
   notifyDeadlineSoon,
-  notifyTaskBlocked,
-  notifyTaskUnblocked,
+  // anciens noms (compat dependencies.js)
+  notifyTaskBlockedMember:   notifyTaskBlocked,
+  notifyTaskUnblockedMember: notifyTaskUnblocked,
 };

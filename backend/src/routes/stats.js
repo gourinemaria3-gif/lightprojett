@@ -34,7 +34,7 @@ function toMs(dateStr) {
 // ══════════════════════════════════════════════════════════════
 router.get("/", async (req, res) => {
   const { projectId } = req.params;
-  const opToken       = req.user.opToken;
+  const opToken = req.opToken; 
 
   try {
     const [tasks, members] = await Promise.all([

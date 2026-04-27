@@ -4,7 +4,7 @@ const api = axios.create({
   baseURL: process.env.REACT_APP_API_URL || "http://localhost:5000",
   timeout: 15000,
   headers: {
-    "Content-Type": "application/json", 
+    "Content-Type": "application/json",
   },
 });
 
@@ -118,6 +118,9 @@ function getAuthHeaders() {
   };
 }
 
+// ── Base URL helper (pour fetch natif) ────────────────────────
+const BASE_URL = process.env.REACT_APP_API_URL || "http://localhost:5000";
+
 // ══════════════════════════════════════════════════════════════
 //  PROJETS
 // ══════════════════════════════════════════════════════════════
@@ -169,7 +172,7 @@ export async function createProject(title, description, tasks = [], managerId, m
 }
 
 export async function deleteProject(projectId) {
-  const res = await fetch(`/api/projects/${projectId}`, {
+  const res = await fetch(`${BASE_URL}/api/projects/${projectId}`, {
     method: "DELETE",
     headers: getAuthHeaders(),
   });
@@ -214,7 +217,6 @@ export async function createSubProject(parentId, payload) {
   invalidateCache();
   return res.data;
 }
-
 
 // ══════════════════════════════════════════════════════════════
 //  MEMBRES DU PROJET
@@ -312,7 +314,7 @@ export async function patchTask(taskId, lockVersion, body, projectId) {
 }
 
 export async function deleteTask(taskId, projectId) {
-  const res = await fetch(`/api/tasks/${taskId}`, {
+  const res = await fetch(`${BASE_URL}/api/tasks/${taskId}`, {
     method: "DELETE",
     headers: getAuthHeaders(),
     body: JSON.stringify({ projectId }),
@@ -343,7 +345,7 @@ export async function addTimeLog(taskId, { opUserId, hoursWorked, loggedDate, no
 }
 
 export async function deleteTimeLog(taskId, logId, projectId) {
-  const res = await fetch(`/api/tasks/${taskId}/timelogs/${logId}`, {
+  const res = await fetch(`${BASE_URL}/api/tasks/${taskId}/timelogs/${logId}`, {
     method: "DELETE",
     headers: getAuthHeaders(),
     body: JSON.stringify({ projectId }),
@@ -355,22 +357,9 @@ export async function deleteTimeLog(taskId, logId, projectId) {
 }
 
 // ══════════════════════════════════════════════════════════════
-//  DÉPENDANCES — NOUVEAU
-//
-//  fetchDependencies  → récupère les dépendances d'une tâche
-//  addDependency      → crée une dépendance (taskId dépend de dependsOnTaskId)
-//  removeDependency   → supprime une dépendance
+//  DÉPENDANCES
 // ══════════════════════════════════════════════════════════════
 
-/**
- * Récupère les dépendances d'une tâche.
- * Retourne :
- * {
- *   taskId, isBlocked,
- *   dependsOn:   [{ taskId, title, status, isDone }],
- *   blockingFor: [{ taskId, title, isBlocked }]
- * }
- */
 export async function fetchDependencies(taskId, projectId) {
   if (!taskId)    throw new Error("taskId manquant.");
   if (!projectId) throw new Error("projectId manquant.");
@@ -381,10 +370,6 @@ export async function fetchDependencies(taskId, projectId) {
   return res.data;
 }
 
-/**
- * Ajoute une dépendance : taskId dépend de dependsOnTaskId.
- * Seul admin ou manager peut faire ça.
- */
 export async function addDependency(taskId, dependsOnTaskId, projectId) {
   if (!taskId || !dependsOnTaskId || !projectId)
     throw new Error("taskId, dependsOnTaskId et projectId sont obligatoires.");
@@ -395,14 +380,10 @@ export async function addDependency(taskId, dependsOnTaskId, projectId) {
     projectId:       Number(projectId),
   });
 
-  // Invalide le cache des tâches pour que isBlocked soit rechargé
   invalidateCache(`tasks:`);
   return res.data;
 }
 
-/**
- * Supprime une dépendance entre deux tâches.
- */
 export async function removeDependency(taskId, dependsOnTaskId, projectId) {
   if (!taskId || !dependsOnTaskId || !projectId)
     throw new Error("taskId, dependsOnTaskId et projectId sont obligatoires.");
@@ -416,6 +397,49 @@ export async function removeDependency(taskId, dependsOnTaskId, projectId) {
   });
 
   invalidateCache(`tasks:`);
+  return res.data;
+}
+
+// ══════════════════════════════════════════════════════════════
+//  BUDGET
+// ══════════════════════════════════════════════════════════════
+
+export async function fetchBudgetSummary(projectId) {
+  const res = await api.get(`/api/budget/${projectId}`);
+  return res.data;
+}
+
+export async function setTaskEstimatedHours(projectId, taskId, estimatedHours) {
+  const res = await api.patch(
+    `/api/budget/${projectId}/tasks/${taskId}/hours`,
+    { estimatedHours: Number(estimatedHours) }
+  );
+  return res.data;
+}
+
+export async function setTaskMemberRate(projectId, taskId, memberRate) {
+  const res = await api.patch(
+    `/api/budget/${projectId}/tasks/${taskId}/rate`,
+    { memberRate: Number(memberRate) }
+  );
+  return res.data;
+}
+
+export async function fetchBudgetByTask(projectId) {
+  const res = await api.get(`/api/budget/${projectId}/tasks`);
+  return res.data;
+}
+
+export async function fetchBudgetTimeline(projectId) {
+  const res = await api.get(`/api/budget/${projectId}/timeline`);
+  return res.data;
+}
+
+export async function updateBudget(projectId, budgetTotal) {
+  const res = await api.patch(`/api/budget/${projectId}`, {
+    budgetTotal: Number(budgetTotal),
+  });
+  invalidateCache("projects:");
   return res.data;
 }
 
@@ -434,6 +458,34 @@ export async function analyzeWithAI(title, description) {
   return res.data;
 }
 
+export async function fetchTaskPlan({ title, description, type, estimatedHours }) {
+  const res = await api.post("/api/ai/task-plan", {
+    title:          sanitize(title),
+    description:    sanitize(description),
+    type:           type || "Développement",
+    estimatedHours: estimatedHours || null,
+  });
+  return res.data;
+}
+
+export async function fetchTaskGuide({ title, description }) {
+  const res = await api.post("/api/ai/task-guide", {
+    title:       sanitize(title),
+    description: sanitize(description),
+  });
+  return res.data;
+}
+
+export async function fetchTaskBlockage({ title, description, status, daysStuck }) {
+  const res = await api.post("/api/ai/task-blockage", {
+    title:       sanitize(title),
+    description: sanitize(description),
+    status:      status    || "Nouveau",
+    daysStuck:   daysStuck || null,
+  });
+  return res.data;
+}
+
 // ══════════════════════════════════════════════════════════════
 //  STATS
 // ══════════════════════════════════════════════════════════════
@@ -442,3 +494,99 @@ export async function fetchStats(projectId) {
   const res = await api.get(`/api/projects/${projectId}/stats`);
   return res.data;
 }
+
+// ══════════════════════════════════════════════════════════════
+//  NOTIFICATIONS
+// ══════════════════════════════════════════════════════════════
+
+export async function fetchNotifications({ unreadOnly = false } = {}) {
+  const res = await api.get("/api/notifications", {
+    params: { unread: unreadOnly ? "true" : "false" },
+  });
+  return res.data;
+}
+
+export async function fetchNotificationCount() {
+  const res = await api.get("/api/notifications/count");
+  return res.data?.count ?? 0;
+}
+
+export async function markNotificationRead(id) {
+  const res = await api.patch(`/api/notifications/${id}/read`);
+  return res.data;
+}
+
+export async function markAllNotificationsRead() {
+  const res = await api.patch("/api/notifications/read-all");
+  return res.data;
+}
+
+export async function deleteNotification(id) {
+  const res = await api.delete(`/api/notifications/${id}`);
+  return res.data;
+}
+
+export async function clearReadNotifications() {
+  const res = await api.get("/api/notifications", { params: { unread: "false" } });
+  const all  = res.data?.notifications ?? [];
+  const read = all.filter((n) => n.is_read === 1);
+
+  await Promise.all(
+    read.map((n) => api.delete(`/api/notifications/${n.id}`).catch(() => {}))
+  );
+  return { deleted: read.length };
+}
+
+export async function fetchNotificationSettings() {
+  const res = await api.get("/api/notifications/preferences");
+  return res.data;
+}
+
+export async function updateNotificationSettings({ enabled, reminderDays }) {
+  const res = await api.put("/api/notifications/preferences", {
+    pushEnabled:  Boolean(enabled),
+    emailEnabled: Boolean(enabled),
+    deadlineDays: Number(reminderDays),
+  });
+  return res.data;
+}
+
+// ══════════════════════════════════════════════════════════════
+//  ALIAS — compatibilité avec le fichier de ta collègue
+//  (ProjectsPage.jsx utilise ces noms-là)
+// ══════════════════════════════════════════════════════════════
+
+// getProjets retourne { data: [...] } pour matcher son code (pRes.data)
+export const getProjets = async (...args) => ({
+  data: await fetchProjects(...args),
+});
+
+// getStats retourne { data: {...} } pour matcher son code (statsRes.data)
+export const getStats = async (projectId) => ({
+  data: await fetchStats(projectId),
+});
+
+// getTaches retourne { data: [...] } pour matcher son code (tachesRes.data)
+export const getTaches = async (projectId) => ({
+  data: await fetchTasks(projectId),
+});
+
+// getProjectMembers retourne { data: [...] } pour matcher son code (membersRes.data)
+export const getProjectMembers = async (projectId) => ({
+  data: await fetchProjectMembers(projectId),
+});
+
+// logout — utilisé dans son handleLogout
+export const logout = () => {
+  localStorage.removeItem("jwt");
+  localStorage.removeItem("user");
+};
+// updateTache — alias de patchTask (utilisé dans ProjectDetailPage.jsx)
+// Son code : updateTache(taskId, data) sans lockVersion ni projectId
+// On met lockVersion=1 par défaut et on extrait projectId du body si présent
+export const updateTache = (taskId, data) =>
+  api.patch(`/api/tasks/${taskId}`, data);
+ 
+// deleteTache — alias de deleteTask (utilisé dans ProjectDetailPage.jsx)
+export const deleteTache = (taskId, projectId) =>
+  api.delete(`/api/tasks/${taskId}`, { data: { projectId } });

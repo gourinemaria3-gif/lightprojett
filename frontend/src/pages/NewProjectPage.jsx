@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { analyzeWithAI, createProject, fetchMembers } from "../services/api";
+import { useNavigate } from "react-router-dom";
 import "./NewProjectPage.css";
 
 const emptyTask = () => ({
@@ -11,42 +12,47 @@ const emptyTask = () => ({
   dueDate: "",
 });
 
+/* ─── Palette Dashboard ─── */
+const C = {
+  green: "#9FB878", greenLight: "#f5f6ec", greenMid: "#dfe0c0", greenDark: "#5a6332",
+  pink: "#d4538a", pinkLight: "#fce7f3", pinkMid: "#f4b8d4", pinkDark: "#7d1f52",
+  orange: "#d4874a", orangeLight: "#fef3e8",
+  blue: "#5a8ac4", blueLight: "#eaf2fb",
+  bg: "#f6f6f2", card: "#ffffff",
+  text: "#2d2d2a", textMuted: "#6e6e68", textLight: "#aaaaaa",
+  border: "#e8e8e0",
+  shadow: "0 2px 8px rgba(0,0,0,0.05)",
+  shadowMd: "0 4px 16px rgba(0,0,0,0.07)",
+};
+
 export default function NewProjectPage({ onBack }) {
-  const [step, setStep] = useState(1);
+  const navigate = useNavigate();
+  const user = JSON.parse(localStorage.getItem("user") || "{}");
 
-  // Étape 1 — infos projet
-  const [title,       setTitle]       = useState("");
+  const [step, setStep]               = useState(1);
+  const [title, setTitle]             = useState("");
   const [description, setDescription] = useState("");
-  const [startDate,   setStartDate]   = useState("");
-  const [endDate,     setEndDate]     = useState("");
-  const [workload,    setWorkload]     = useState("");
-  const [managerId,   setManagerId]   = useState("");
-  const [useAI,       setUseAI]       = useState(false);
-  const [members,     setMembers]     = useState([]);
-
-  // Erreurs temps réel étape 1
-  const [errors, setErrors] = useState({});
-
-  // Étape 2 — tâches
-  const [tasks,         setTasks]         = useState([]);
-  const [taskErrors,    setTaskErrors]    = useState({});
+  const [startDate, setStartDate]     = useState("");
+  const [endDate, setEndDate]         = useState("");
+  const [workload, setWorkload]       = useState("");
+  const [managerId, setManagerId]     = useState("");
+  const [useAI, setUseAI]             = useState(false);
+  const [members, setMembers]         = useState([]);
+  const [errors, setErrors]           = useState({});
+  const [tasks, setTasks]             = useState([]);
+  const [taskErrors, setTaskErrors]   = useState({});
   const [correctedDesc, setCorrectedDesc] = useState("");
-  const [aiLoading,     setAiLoading]     = useState(false);
-  const [aiError,       setAiError]       = useState(null);
+  const [aiLoading, setAiLoading]     = useState(false);
+  const [aiError, setAiError]         = useState(null);
   const [editingTaskId, setEditingTaskId] = useState(null);
-
-  // Étape 3 — création
-  const [creating,    setCreating]    = useState(false);
+  const [creating, setCreating]       = useState(false);
   const [createError, setCreateError] = useState(null);
-  const [success,     setSuccess]     = useState(false);
+  const [success, setSuccess]         = useState(false);
 
   useEffect(() => {
-    fetchMembers()
-      .then(setMembers)
-      .catch(() => setMembers([]));
+    fetchMembers().then(setMembers).catch(() => setMembers([]));
   }, []);
 
-  // ── Validation temps réel étape 1 ────────────────────────
   function validateField(field, value, extra = {}) {
     let error = "";
     switch (field) {
@@ -71,14 +77,12 @@ export default function NewProjectPage({ onBack }) {
         if (value && (isNaN(Number(value)) || Number(value) < 0))
           error = "Le workload doit être un nombre positif.";
         break;
-      default:
-        break;
+      default: break;
     }
     setErrors((prev) => ({ ...prev, [field]: error }));
     return error;
   }
 
-  // ── Validation temps réel tâches ─────────────────────────
   function validateTaskField(taskId, field, value, extra = {}) {
     let error = "";
     switch (field) {
@@ -98,8 +102,7 @@ export default function NewProjectPage({ onBack }) {
         if (value && extra.startDate && new Date(extra.startDate) > new Date(value))
           error = "Fin avant le début.";
         break;
-      default:
-        break;
+      default: break;
     }
     setTaskErrors((prev) => ({
       ...prev,
@@ -108,9 +111,7 @@ export default function NewProjectPage({ onBack }) {
     return error;
   }
 
-  // ── Étape 1 → 2 ──────────────────────────────────────────
   async function handleNext() {
-    // Valider tous les champs avant de continuer
     const e1 = validateField("title", title);
     const e2 = validateField("description", description);
     const e3 = validateField("startDate", startDate, { endDate });
@@ -119,42 +120,31 @@ export default function NewProjectPage({ onBack }) {
     if (e1 || e2 || e3 || e4 || e5) return;
 
     if (useAI) {
-      setAiLoading(true);
-      setAiError(null);
+      setAiLoading(true); setAiError(null);
       try {
         const result = await analyzeWithAI(title, description);
         setCorrectedDesc(result.correctedDescription || description);
-        setTasks(
-          (result.tasks || []).map((t) => ({
-            id:             Date.now() + Math.random(),
-            title:          t.title          || "",
-            description:    t.description    || "",
-            estimatedHours: t.estimatedHours || "",
-            startDate:      startDate        || "",
-            dueDate:        endDate          || "",
-          }))
-        );
+        setTasks((result.tasks || []).map((t) => ({
+          id: Date.now() + Math.random(),
+          title: t.title || "", description: t.description || "",
+          estimatedHours: t.estimatedHours || "",
+          startDate: startDate || "", dueDate: endDate || "",
+        })));
       } catch (err) {
         setAiError("Erreur IA : " + err.message);
-        setAiLoading(false);
-        return;
-      } finally {
-        setAiLoading(false);
-      }
-    } else {
-      setTasks([emptyTask()]);
-    }
+        setAiLoading(false); return;
+      } finally { setAiLoading(false); }
+    } else { setTasks([emptyTask()]); }
     setStep(2);
   }
 
-  // ── Gestion tâches ────────────────────────────────────────
   function updateTask(id, field, value) {
     setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, [field]: value } : t)));
     const task = tasks.find((t) => t.id === id);
-    if (field === "startDate") validateTaskField(id, field, value, { dueDate: task?.dueDate });
-    if (field === "dueDate")   validateTaskField(id, field, value, { startDate: task?.startDate });
+    if (field === "startDate")      validateTaskField(id, field, value, { dueDate: task?.dueDate });
+    if (field === "dueDate")        validateTaskField(id, field, value, { startDate: task?.startDate });
     if (field === "estimatedHours") validateTaskField(id, field, value);
-    if (field === "title")     validateTaskField(id, field, value);
+    if (field === "title")          validateTaskField(id, field, value);
   }
 
   function deleteTask(id) {
@@ -169,361 +159,540 @@ export default function NewProjectPage({ onBack }) {
     setEditingTaskId(newTask.id);
   }
 
-  // ── Création finale ───────────────────────────────────────
   async function handleCreate() {
-    setCreating(true);
-    setCreateError(null);
+    setCreating(true); setCreateError(null);
     try {
       const finalDesc = correctedDesc || description;
       const selectedManager = members.find((m) => String(m.id) === String(managerId));
       await createProject(
         title, finalDesc, tasks,
-        managerId       || null,
-        selectedManager?.name  || null,
+        managerId || null,
+        selectedManager?.name || null,
         selectedManager?.email || null,
-        startDate       || null,
-        endDate         || null,
-        workload        || null
+        startDate || null, endDate || null, workload || null
       );
       setSuccess(true);
-    } catch (err) {
-      setCreateError("Erreur : " + err.message);
-    } finally {
-      setCreating(false);
-    }
+    } catch (err) { setCreateError("Erreur : " + err.message); }
+    finally { setCreating(false); }
   }
 
+  const handleLogout = () => {
+    localStorage.removeItem("jwt"); localStorage.removeItem("user"); navigate("/");
+  };
+
+  const goBack = onBack || (() => navigate("/projets"));
   const selectedManager = members.find((m) => String(m.id) === String(managerId));
 
-  // ── Succès ────────────────────────────────────────────────
-  if (success) {
-    return (
-      <div className="new-project-page">
-        <div className="np-success">
-          <div className="np-success-icon">🎉</div>
-          <h2>Projet créé avec succès !</h2>
-          <p>
-            Le projet <strong>"{title}"</strong> et ses {tasks.length} tâche{tasks.length > 1 ? "s" : ""}{" "}
-            ont été créés dans OpenProject.
+  /* ── Styles partagés ── */
+  const fieldLabel = {
+    fontSize: "11px", fontWeight: "700", letterSpacing: "0.08em",
+    textTransform: "uppercase", color: C.textMuted, display: "block", marginBottom: "7px",
+  };
+
+  const fieldInput = (hasError = false) => ({
+    width: "100%", background: "#fff",
+    border: `1.5px solid ${hasError ? C.pink : C.border}`,
+    borderRadius: "10px", padding: "11px 14px", color: C.text,
+    fontFamily: "'Segoe UI', Arial, sans-serif", fontSize: "13px", outline: "none",
+    boxShadow: hasError ? `0 0 0 3px rgba(212,83,138,0.10)` : "0 1px 3px rgba(0,0,0,0.04)",
+    transition: "border-color 0.2s, box-shadow 0.2s", boxSizing: "border-box",
+  });
+
+  const errorMsg = (msg) => msg ? (
+    <span style={{
+      fontSize: "11px", color: C.pinkDark, marginTop: "5px",
+      background: C.pinkLight, border: `1px solid ${C.pinkMid}`,
+      borderRadius: "6px", padding: "3px 9px", display: "inline-block",
+    }}>⚠ {msg}</span>
+  ) : null;
+
+  const cardShell = {
+    background: C.card, borderRadius: "18px",
+    border: `1px solid ${C.border}`, boxShadow: C.shadowMd, overflow: "hidden",
+  };
+
+  /* FIX: unified neutral white card header — ends all color clashes */
+  const cardHeader = () => ({
+    background: "#fff",
+    borderBottom: `1px solid ${C.border}`,
+    padding: "18px 28px", display: "flex", alignItems: "center", gap: "12px",
+  });
+
+  const iconBox = (bg = C.green, shadow = "rgba(159,184,120,0.4)") => ({
+    width: "38px", height: "38px", borderRadius: "11px", background: bg,
+    display: "flex", alignItems: "center", justifyContent: "center",
+    fontSize: "17px", boxShadow: `0 3px 10px ${shadow}`, flexShrink: 0,
+  });
+
+  /* ── SUCCESS ── */
+  if (success) return (
+    <div style={{ display: "grid", gridTemplateColumns: "220px 1fr", minHeight: "100vh", background: C.bg, fontFamily: "'Segoe UI',Arial,sans-serif" }}>
+      <Sidebar user={user} navigate={navigate} handleLogout={handleLogout} C={C} />
+      <main style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "40px" }}>
+        <div style={{ textAlign: "center", maxWidth: "460px" }}>
+          <div style={{ fontSize: "64px", marginBottom: "20px" }}>🎉</div>
+          <h2 style={{ fontSize: "28px", fontWeight: "700", color: C.text, marginBottom: "12px" }}>Projet créé avec succès !</h2>
+          <p style={{ color: C.textMuted, fontSize: "14px", marginBottom: "32px", lineHeight: 1.8 }}>
+            Le projet <strong>"{title}"</strong> et ses <strong>{tasks.length}</strong> tâche{tasks.length > 1 ? "s" : ""} ont été créés dans OpenProject.
           </p>
-          <button className="np-success-btn" onClick={onBack}>
-            Retour à l'accueil →
-          </button>
+          <div style={{ display: "flex", gap: "12px", justifyContent: "center" }}>
+            <button onClick={() => navigate("/projets")} style={{ padding: "12px 24px", background: C.greenLight, border: `1px solid ${C.greenMid}`, borderRadius: "999px", color: C.greenDark, fontSize: "13px", fontWeight: "600", cursor: "pointer" }}>Voir mes projets</button>
+            <button onClick={() => navigate("/dashboard")} style={{ padding: "12px 24px", background: C.green, border: "none", borderRadius: "999px", color: "#fff", fontSize: "13px", fontWeight: "600", cursor: "pointer", boxShadow: `0 3px 10px rgba(159,184,120,0.35)` }}>Dashboard →</button>
+          </div>
         </div>
-      </div>
-    );
-  }
+      </main>
+    </div>
+  );
 
   return (
-    <div className="new-project-page">
+    <div style={{ display: "grid", gridTemplateColumns: "220px 1fr", minHeight: "100vh", background: C.bg, fontFamily: "'Segoe UI',Arial,sans-serif" }}>
+      <Sidebar user={user} navigate={navigate} handleLogout={handleLogout} C={C} />
 
-      {/* Header */}
-      <div className="np-header">
-        <button
-          className="np-back-btn"
-          onClick={step === 1 ? onBack : step === 2 ? () => setStep(1) : () => setStep(2)}
-        >
-          ← {step === 1 ? "Retour" : "Étape précédente"}
-        </button>
-        <div className="np-header-text">
-          <p className="np-eyebrow">Light Project — Étape {step}/3</p>
-          <h1 className="np-title">
-            {step === 1 && <>Nouveau <span>Projet</span></>}
-            {step === 2 && <>Les <span>Tâches</span></>}
-            {step === 3 && <>Récapitulatif &amp; <span>Validation</span></>}
-          </h1>
-        </div>
-      </div>
+      <main style={{ overflowY: "auto", padding: "32px 40px" }}>
+        {/* FIX: increased max-width from 960px → 1100px */}
+        <div style={{ maxWidth: "1100px", margin: "0 auto" }}>
 
-      {/* Stepper */}
-      <div className="np-stepper">
-        <div className={`np-step ${step >= 1 ? "active" : ""}`}>
-          <div className="np-step-dot">{step > 1 ? "✓" : "1"}</div>
-          <span>Informations</span>
-        </div>
-        <div className="np-step-line" />
-        <div className={`np-step ${step >= 2 ? "active" : ""}`}>
-          <div className="np-step-dot">{step > 2 ? "✓" : "2"}</div>
-          <span>Tâches</span>
-        </div>
-        <div className="np-step-line" />
-        <div className={`np-step ${step >= 3 ? "active" : ""}`}>
-          <div className="np-step-dot">3</div>
-          <span>Validation</span>
-        </div>
-      </div>
+          {/* HEADER */}
+          <div style={{ marginBottom: "26px" }}>
+            <button
+              onClick={step === 1 ? goBack : step === 2 ? () => setStep(1) : () => setStep(2)}
+              style={{
+                background: C.card, border: `1px solid ${C.border}`, borderRadius: "999px",
+                padding: "7px 16px", fontSize: "12px", color: C.textMuted, cursor: "pointer",
+                fontWeight: "600", marginBottom: "14px", boxShadow: C.shadow,
+                display: "inline-flex", alignItems: "center", gap: "4px",
+              }}
+            >← {step === 1 ? "Retour aux projets" : "Étape précédente"}</button>
 
-      {/* ═══ ÉTAPE 1 ═══ */}
-      {step === 1 && (
-        <div className="np-section">
-          <h2 className="np-section-title"><span>📋</span> Informations du projet</h2>
-
-          <div className="np-form-grid full">
-            <div className="np-field">
-              <label>Titre du projet *</label>
-              <input
-                type="text"
-                placeholder="Ex: Refonte du site web"
-                value={title}
-                onChange={(e) => { setTitle(e.target.value); validateField("title", e.target.value); }}
-                className={errors.title ? "np-input-error" : ""}
-              />
-              {errors.title && <span className="np-field-error">⚠ {errors.title}</span>}
+            <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: "12px" }}>
+              <div>
+                <p style={{ fontSize: "11px", fontWeight: "700", letterSpacing: "0.1em", textTransform: "uppercase", color: C.green, margin: "0 0 5px" }}>
+                  Light Project — Étape {step}/3
+                </p>
+                <h1 style={{ fontSize: "26px", fontWeight: "700", color: C.text, margin: 0, lineHeight: 1.2 }}>
+                  {step === 1 && "Nouveau Projet"}
+                  {step === 2 && "Les Tâches"}
+                  {step === 3 && "Récapitulatif & Validation"}
+                </h1>
+              </div>
+              <span style={{
+                background: C.card, border: `1px solid ${C.border}`, borderRadius: "999px",
+                padding: "6px 16px", fontSize: "12px", color: C.textMuted,
+                boxShadow: C.shadow, whiteSpace: "nowrap", flexShrink: 0,
+              }}>Étape <strong style={{ color: C.text }}>{step}</strong> sur 3</span>
             </div>
           </div>
 
-          <div className="np-form-grid full" style={{ marginTop: 14 }}>
-            <div className="np-field">
-              <label>Description du projet *</label>
-              <textarea
-                placeholder="Décrivez votre projet en quelques phrases..."
-                value={description}
-                onChange={(e) => { setDescription(e.target.value); validateField("description", e.target.value); }}
-                className={errors.description ? "np-input-error" : ""}
-              />
-              {errors.description && <span className="np-field-error">⚠ {errors.description}</span>}
-            </div>
+          {/* STEPPER */}
+          <div style={{
+            background: C.card, borderRadius: "14px", padding: "16px 24px",
+            border: `1px solid ${C.border}`, boxShadow: C.shadow,
+            display: "flex", alignItems: "center", gap: "10px", marginBottom: "28px",
+          }}>
+            {[["1", "Informations"], ["2", "Tâches"], ["3", "Validation"]].map(([num, label], i) => {
+              const active = step >= i + 1;
+              const done   = step > i + 1;
+              return (
+                <React.Fragment key={num}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px", opacity: active ? 1 : 0.35, transition: "opacity 0.3s" }}>
+                    <div style={{
+                      width: "28px", height: "28px", borderRadius: "50%",
+                      background: active ? C.green : C.bg,
+                      border: `2px solid ${active ? C.green : C.border}`,
+                      color: active ? "#fff" : C.textMuted,
+                      fontSize: "11px", fontWeight: "700",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      boxShadow: active && !done ? `0 0 0 4px ${C.greenLight}` : "none",
+                      transition: "all 0.3s",
+                    }}>{done ? "✓" : num}</div>
+                    <span style={{ fontSize: "13px", color: active ? C.greenDark : C.textMuted, fontWeight: active ? "600" : "400" }}>{label}</span>
+                  </div>
+                  {i < 2 && (
+                    <div style={{ flex: 1, height: "2px", borderRadius: "2px", background: step > i + 1 ? C.green : C.border, transition: "background 0.3s" }} />
+                  )}
+                </React.Fragment>
+              );
+            })}
           </div>
 
-          <div className="np-form-grid full" style={{ marginTop: 14 }}>
-            <div className="np-field">
-              <label>Chef de projet</label>
-              <select value={managerId} onChange={(e) => setManagerId(e.target.value)}>
-                <option value="">— Sélectionner un membre —</option>
-                {members.map((m) => (
-                  <option key={m.id} value={m.id}>{m.name}</option>
-                ))}
-              </select>
-            </div>
-          </div>
+          {/* ═══════════════ ÉTAPE 1 ═══════════════ */}
+          {step === 1 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "18px" }}>
 
-          <div className="np-form-grid" style={{ marginTop: 14 }}>
-            <div className="np-field">
-              <label>Date de début</label>
-              <input
-                type="date"
-                value={startDate}
-                onChange={(e) => { setStartDate(e.target.value); validateField("startDate", e.target.value, { endDate }); validateField("endDate", endDate, { startDate: e.target.value }); }}
-                className={errors.startDate ? "np-input-error" : ""}
-              />
-              {errors.startDate && <span className="np-field-error">⚠ {errors.startDate}</span>}
-            </div>
-            <div className="np-field">
-              <label>Date de fin cible</label>
-              <input
-                type="date"
-                value={endDate}
-                onChange={(e) => { setEndDate(e.target.value); validateField("endDate", e.target.value, { startDate }); validateField("startDate", startDate, { endDate: e.target.value }); }}
-                className={errors.endDate ? "np-input-error" : ""}
-              />
-              {errors.endDate && <span className="np-field-error">⚠ {errors.endDate}</span>}
-            </div>
-          </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "18px" }}>
 
-          <div className="np-form-grid full" style={{ marginTop: 14 }}>
-            <div className="np-field">
-              <label>Workload global estimé (heures)</label>
-              <input
-                type="number"
-                placeholder="Ex: 120"
-                value={workload}
-                onChange={(e) => { setWorkload(e.target.value); validateField("workload", e.target.value); }}
-                className={errors.workload ? "np-input-error" : ""}
-              />
-              {errors.workload && <span className="np-field-error">⚠ {errors.workload}</span>}
-            </div>
-          </div>
-
-          <div className="np-ai-checkbox" onClick={() => setUseAI(!useAI)}>
-            <div className={`np-checkbox ${useAI ? "checked" : ""}`}>
-              {useAI && <span>✓</span>}
-            </div>
-            <div className="np-checkbox-text">
-              <span className="np-checkbox-label">✨ Analyser avec l'IA Gemini</span>
-              <span className="np-checkbox-desc">
-                L'IA corrigera la description et proposera des tâches automatiquement
-              </span>
-            </div>
-          </div>
-
-          {aiError && (
-            <p style={{ color: "var(--coral)", fontSize: 13, marginTop: 10 }}>⚠️ {aiError}</p>
-          )}
-
-          <button className="np-submit-btn" onClick={handleNext} disabled={aiLoading} style={{ marginTop: 20 }}>
-            {aiLoading ? <><span className="np-spinner" /> Analyse IA en cours...</> : "Suivant →"}
-          </button>
-        </div>
-      )}
-
-      {/* ═══ ÉTAPE 2 ═══ */}
-      {step === 2 && (
-        <div className="np-section np-ai-result">
-          <h2 className="np-section-title">
-            <span>{useAI ? "🤖" : "✏️"}</span>
-            {useAI ? "Tâches proposées par l'IA" : "Tâches du projet"}
-          </h2>
-
-          {correctedDesc && (
-            <div className="np-corrected">
-              <strong>Description corrigée par l'IA</strong>
-              {correctedDesc}
-            </div>
-          )}
-
-          <div className="np-tasks-list">
-            {tasks.map((task, i) => (
-              <div key={task.id} className="np-task-item" style={{ animationDelay: `${i * 60}ms` }}>
-                <div className="np-task-top">
-                  <input
-                    type="text"
-                    value={task.title}
-                    placeholder="Titre de la tâche"
-                    onChange={(e) => updateTask(task.id, "title", e.target.value)}
-                    className={taskErrors[task.id]?.title ? "np-input-error" : ""}
-                  />
-                  <button className="np-task-edit-btn"
-                    onClick={() => setEditingTaskId(editingTaskId === task.id ? null : task.id)}>
-                    {editingTaskId === task.id ? "▲" : "✏️"}
-                  </button>
-                  <button className="np-task-delete" onClick={() => deleteTask(task.id)}>✕</button>
-                </div>
-                {taskErrors[task.id]?.title && (
-                  <span className="np-field-error">⚠ {taskErrors[task.id].title}</span>
-                )}
-
-                {editingTaskId === task.id && (
-                  <div className="np-task-details">
-                    <div className="np-field" style={{ marginBottom: 10 }}>
-                      <label>Description</label>
-                      <textarea
-                        value={task.description}
-                        placeholder="Description de la tâche..."
-                        onChange={(e) => updateTask(task.id, "description", e.target.value)}
-                        style={{ minHeight: 70 }}
-                      />
-                    </div>
-                    <div className="np-task-meta">
-                      <div>
-                        <input
-                          type="number"
-                          value={task.estimatedHours}
-                          placeholder="Heures estimées"
-                          onChange={(e) => updateTask(task.id, "estimatedHours", e.target.value)}
-                          className={taskErrors[task.id]?.estimatedHours ? "np-input-error" : ""}
-                        />
-                        {taskErrors[task.id]?.estimatedHours && (
-                          <span className="np-field-error">⚠ {taskErrors[task.id].estimatedHours}</span>
-                        )}
-                      </div>
-                      <div>
-                        <input
-                          type="date"
-                          value={task.startDate}
-                          onChange={(e) => updateTask(task.id, "startDate", e.target.value)}
-                          className={taskErrors[task.id]?.startDate ? "np-input-error" : ""}
-                        />
-                        {taskErrors[task.id]?.startDate && (
-                          <span className="np-field-error">⚠ {taskErrors[task.id].startDate}</span>
-                        )}
-                      </div>
-                      <div>
-                        <input
-                          type="date"
-                          value={task.dueDate}
-                          onChange={(e) => updateTask(task.id, "dueDate", e.target.value)}
-                          className={taskErrors[task.id]?.dueDate ? "np-input-error" : ""}
-                        />
-                        {taskErrors[task.id]?.dueDate && (
-                          <span className="np-field-error">⚠ {taskErrors[task.id].dueDate}</span>
-                        )}
-                      </div>
+                {/* Informations générales */}
+                <div style={cardShell}>
+                  <div style={cardHeader()}>
+                    <div style={iconBox()}>📋</div>
+                    <div>
+                      <p style={{ fontSize: "14px", fontWeight: "700", color: C.text, margin: 0 }}>Informations du projet</p>
+                      <p style={{ fontSize: "12px", color: C.textMuted, margin: "2px 0 0" }}>Titre, description et responsable</p>
                     </div>
                   </div>
-                )}
-              </div>
-            ))}
-          </div>
-
-          <button className="np-add-task-btn" onClick={addTask}>+ Ajouter une tâche</button>
-
-          <button className="np-submit-btn" onClick={() => setStep(3)} style={{ marginTop: 20 }}>
-            Suivant → Récapitulatif
-          </button>
-        </div>
-      )}
-
-      {/* ═══ ÉTAPE 3 ═══ */}
-      {step === 3 && (
-        <div className="np-section np-review">
-          <h2 className="np-section-title"><span>🔍</span> Récapitulatif du projet</h2>
-
-          <div className="np-review-block">
-            <div className="np-review-block-title">📋 Informations générales</div>
-            <div className="np-review-grid">
-              {[
-                ["Titre",            title || "—"],
-                ["Chef de projet",   selectedManager?.name || "Non assigné"],
-                ["Date de début",    startDate || "—"],
-                ["Date de fin cible",endDate   || "—"],
-                ["Workload estimé",  workload ? `${workload} heures` : "—"],
-                ["Généré par IA",    useAI ? "✅ Oui" : "Non"],
-              ].map(([label, value]) => (
-                <div key={label} className="np-review-item">
-                  <span className="np-review-label">{label}</span>
-                  <span className="np-review-value">{value}</span>
-                </div>
-              ))}
-            </div>
-            <div style={{ marginTop: 14 }}>
-              <span className="np-review-label">Description</span>
-              <div className="np-review-desc">{correctedDesc || description || "—"}</div>
-            </div>
-          </div>
-
-          <div className="np-review-block" style={{ marginTop: 16 }}>
-            <div className="np-review-block-title">📝 Tâches ({tasks.length})</div>
-            {tasks.length === 0 ? (
-              <p className="np-review-empty">Aucune tâche définie.</p>
-            ) : (
-              <div className="np-review-tasks">
-                {tasks.map((task, i) => (
-                  <div key={task.id} className="np-review-task">
-                    <div className="np-review-task-header">
-                      <span className="np-review-task-num">{i + 1}</span>
-                      <span className="np-review-task-title">{task.title || <em>Sans titre</em>}</span>
-                      {task.estimatedHours && (
-                        <span className="np-review-task-badge">⏱ {task.estimatedHours}h</span>
-                      )}
+                  <div style={{ padding: "24px", display: "flex", flexDirection: "column", gap: "18px" }}>
+                    <div>
+                      <label style={fieldLabel}>Titre du projet *</label>
+                      <input style={fieldInput(!!errors.title)} type="text" placeholder="Ex: Refonte du site web"
+                        value={title} onChange={(e) => { setTitle(e.target.value); validateField("title", e.target.value); }} />
+                      {errorMsg(errors.title)}
                     </div>
-                    {(task.description || task.startDate || task.dueDate) && (
-                      <div className="np-review-task-body">
-                        {task.description && <p className="np-review-task-desc">{task.description}</p>}
-                        <div className="np-review-task-dates">
-                          {task.startDate && <span>🗓 Début : {task.startDate}</span>}
-                          {task.dueDate   && <span>🏁 Fin : {task.dueDate}</span>}
+                    <div>
+                      <label style={fieldLabel}>Description du projet *</label>
+                      <textarea style={{ ...fieldInput(!!errors.description), minHeight: "120px", resize: "vertical" }}
+                        placeholder="Décrivez votre projet en quelques phrases..."
+                        value={description} onChange={(e) => { setDescription(e.target.value); validateField("description", e.target.value); }} />
+                      {errorMsg(errors.description)}
+                    </div>
+                    <div>
+                      <label style={fieldLabel}>Chef de projet</label>
+                      <select style={fieldInput()} value={managerId} onChange={(e) => setManagerId(e.target.value)}>
+                        <option value="">— Sélectionner un membre —</option>
+                        {members.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                {/* FIX: Planification — white header, blue icon only, no blue bg */}
+                <div style={{ display: "flex", flexDirection: "column", gap: "18px" }}>
+                  <div style={cardShell}>
+                    <div style={cardHeader()}>
+                      <div style={iconBox(C.blue, "rgba(90,138,196,0.25)")}>🗓</div>
+                      <div>
+                        <p style={{ fontSize: "14px", fontWeight: "700", color: C.text, margin: 0 }}>Planification</p>
+                        <p style={{ fontSize: "12px", color: C.textMuted, margin: "2px 0 0" }}>Dates et charge estimée</p>
+                      </div>
+                    </div>
+                    <div style={{ padding: "24px", display: "flex", flexDirection: "column", gap: "14px" }}>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+                        <div>
+                          <label style={fieldLabel}>Date de début</label>
+                          <input style={fieldInput(!!errors.startDate)} type="date" value={startDate}
+                            onChange={(e) => { setStartDate(e.target.value); validateField("startDate", e.target.value, { endDate }); validateField("endDate", endDate, { startDate: e.target.value }); }} />
+                          {errorMsg(errors.startDate)}
+                        </div>
+                        <div>
+                          <label style={fieldLabel}>Date de fin cible</label>
+                          <input style={fieldInput(!!errors.endDate)} type="date" value={endDate}
+                            onChange={(e) => { setEndDate(e.target.value); validateField("endDate", e.target.value, { startDate }); validateField("startDate", startDate, { endDate: e.target.value }); }} />
+                          {errorMsg(errors.endDate)}
                         </div>
                       </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+                      <div>
+                        <label style={fieldLabel}>Workload estimé (heures)</label>
+                        <input style={fieldInput(!!errors.workload)} type="number" placeholder="Ex: 120"
+                          value={workload} onChange={(e) => { setWorkload(e.target.value); validateField("workload", e.target.value); }} />
+                        {errorMsg(errors.workload)}
+                      </div>
 
-          {createError && (
-            <p style={{ color: "var(--coral)", fontSize: 13, marginTop: 12 }}>⚠️ {createError}</p>
+                      {/* FIX: compact toggle pill — not a big card anymore */}
+                      <div
+                        onClick={() => setUseAI(!useAI)}
+                        style={{
+                          display: "flex", alignItems: "center", gap: "10px",
+                          padding: "10px 14px",
+                          border: `1.5px solid ${useAI ? C.green : C.border}`,
+                          borderRadius: "10px",
+                          background: useAI ? C.greenLight : C.bg,
+                          cursor: "pointer", transition: "all 0.2s",
+                          marginTop: "4px",
+                        }}
+                      >
+                        <div style={{
+                          width: "34px", height: "20px", borderRadius: "999px",
+                          background: useAI ? C.green : "#d1d1c8",
+                          position: "relative", flexShrink: 0,
+                          transition: "background 0.2s",
+                        }}>
+                          <div style={{
+                            position: "absolute", top: "3px",
+                            left: useAI ? "16px" : "3px",
+                            width: "14px", height: "14px", borderRadius: "50%",
+                            background: "#fff",
+                            boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
+                            transition: "left 0.2s",
+                          }} />
+                        </div>
+                        <span style={{ fontSize: "12px", fontWeight: "600", color: useAI ? C.greenDark : C.textMuted }}>
+                          ✨ Analyser avec l'IA Gemini
+                        </span>
+                        <span style={{ fontSize: "11px", color: C.textLight, marginLeft: "auto" }}>
+                          Tâches auto
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {aiError && (
+                    <p style={{ color: C.pinkDark, fontSize: "12px", background: C.pinkLight, padding: "10px 14px", borderRadius: "10px", border: `1px solid ${C.pinkMid}`, margin: 0 }}>⚠️ {aiError}</p>
+                  )}
+                </div>
+              </div>
+
+              <button onClick={handleNext} disabled={aiLoading} style={{
+                width: "100%", padding: "15px",
+                background: aiLoading ? C.textLight : C.green,
+                border: "none", borderRadius: "12px", color: "#fff",
+                fontFamily: "'Segoe UI', Arial, sans-serif", fontSize: "14px", fontWeight: "700",
+                cursor: aiLoading ? "not-allowed" : "pointer",
+                boxShadow: `0 3px 12px rgba(159,184,120,0.35)`, transition: "opacity 0.2s",
+              }}>
+                {aiLoading ? "⏳ Analyse IA en cours..." : "Suivant →"}
+              </button>
+            </div>
           )}
 
-          <button className="np-submit-btn np-validate-btn" onClick={handleCreate}
-            disabled={creating} style={{ marginTop: 24 }}>
-            {creating
-              ? <><span className="np-spinner" /> Création en cours...</>
-              : <>✅ Valider et créer dans OpenProject</>
-            }
-          </button>
+          {/* ═══════════════ ÉTAPE 2 ═══════════════ */}
+          {step === 2 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "18px" }}>
+
+              {correctedDesc && (
+                <div style={{ background: C.greenLight, border: `1px solid ${C.greenMid}`, borderRadius: "14px", padding: "16px 22px" }}>
+                  <p style={{ fontSize: "10px", fontWeight: "700", textTransform: "uppercase", letterSpacing: "0.1em", color: C.greenDark, opacity: 0.7, margin: "0 0 6px" }}>✨ Description corrigée par l'IA</p>
+                  <p style={{ fontSize: "13px", color: C.greenDark, lineHeight: 1.7, margin: 0 }}>{correctedDesc}</p>
+                </div>
+              )}
+
+              {/* FIX: tasks card — white header, green icon for AI too (no purple/blue clash) */}
+              <div style={cardShell}>
+                <div style={cardHeader()}>
+                  <div style={iconBox(C.green, "rgba(159,184,120,0.4)")}>{useAI ? "🤖" : "✏️"}</div>
+                  <div>
+                    <p style={{ fontSize: "14px", fontWeight: "700", color: C.text, margin: 0 }}>{useAI ? "Tâches proposées par l'IA" : "Tâches du projet"}</p>
+                    <p style={{ fontSize: "12px", color: C.textMuted, margin: "2px 0 0" }}>{tasks.length} tâche{tasks.length > 1 ? "s" : ""} · Cliquez sur ✏️ pour modifier</p>
+                  </div>
+                </div>
+
+                <div style={{ padding: "20px 28px", display: "flex", flexDirection: "column", gap: "10px" }}>
+                  {tasks.map((task, i) => (
+                    <div key={task.id} style={{
+                      background: C.bg,
+                      border: `1.5px solid ${editingTaskId === task.id ? C.green : C.border}`,
+                      borderRadius: "12px", overflow: "hidden",
+                      boxShadow: editingTaskId === task.id ? `0 0 0 3px ${C.greenLight}` : "none",
+                      transition: "all 0.2s",
+                    }}>
+                      <div style={{ padding: "13px 16px", display: "flex", alignItems: "center", gap: "10px" }}>
+                        <div style={{
+                          width: "26px", height: "26px", borderRadius: "50%", flexShrink: 0,
+                          background: editingTaskId === task.id ? C.green : C.greenLight,
+                          border: `1.5px solid ${C.greenMid}`,
+                          color: editingTaskId === task.id ? "#fff" : C.greenDark,
+                          fontSize: "11px", fontWeight: "700",
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          transition: "all 0.2s",
+                        }}>{i + 1}</div>
+                        <input type="text" value={task.title} placeholder="Titre de la tâche"
+                          onChange={(e) => updateTask(task.id, "title", e.target.value)}
+                          style={{ flex: 1, background: "transparent", border: "none", borderBottom: `1.5px solid ${taskErrors[task.id]?.title ? C.pink : "transparent"}`, padding: "3px 0", color: C.text, fontFamily: "inherit", fontSize: "13px", fontWeight: "600", outline: "none" }} />
+                        <button onClick={() => setEditingTaskId(editingTaskId === task.id ? null : task.id)}
+                          style={{ background: editingTaskId === task.id ? C.greenLight : "#fff", border: `1px solid ${editingTaskId === task.id ? C.green : C.border}`, borderRadius: "8px", color: editingTaskId === task.id ? C.greenDark : C.textMuted, width: "32px", height: "32px", cursor: "pointer", fontSize: "13px", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                          {editingTaskId === task.id ? "▲" : "✏️"}
+                        </button>
+                        <button onClick={() => deleteTask(task.id)}
+                          style={{ background: C.pinkLight, border: `1px solid ${C.pinkMid}`, borderRadius: "8px", color: C.pinkDark, width: "32px", height: "32px", cursor: "pointer", fontSize: "13px", display: "flex", alignItems: "center", justifyContent: "center" }}>✕</button>
+                      </div>
+                      {taskErrors[task.id]?.title && (
+                        <div style={{ paddingLeft: "56px", paddingBottom: "8px" }}>{errorMsg(taskErrors[task.id].title)}</div>
+                      )}
+                      {editingTaskId === task.id && (
+                        <div style={{ borderTop: `1px solid ${C.greenMid}`, padding: "18px 20px", background: "#fff", display: "flex", flexDirection: "column", gap: "14px" }}>
+                          <div>
+                            <label style={fieldLabel}>Description</label>
+                            <textarea value={task.description} placeholder="Description de la tâche..."
+                              onChange={(e) => updateTask(task.id, "description", e.target.value)}
+                              style={{ ...fieldInput(), minHeight: "70px", resize: "vertical" }} />
+                          </div>
+                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "12px" }}>
+                            {[
+                              { label: "Heures estimées", field: "estimatedHours", type: "number", placeholder: "Ex: 8" },
+                              { label: "Date de début",   field: "startDate",       type: "date"   },
+                              { label: "Date de fin",     field: "dueDate",         type: "date"   },
+                            ].map(({ label, field, type, placeholder }) => (
+                              <div key={field}>
+                                <label style={fieldLabel}>{label}</label>
+                                <input type={type} value={task[field]} placeholder={placeholder || ""}
+                                  onChange={(e) => updateTask(task.id, field, e.target.value)}
+                                  style={fieldInput(!!taskErrors[task.id]?.[field])} />
+                                {errorMsg(taskErrors[task.id]?.[field])}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+
+                  <button onClick={addTask} style={{
+                    width: "100%", padding: "12px",
+                    background: "transparent", border: `1.5px dashed ${C.greenMid}`,
+                    borderRadius: "12px", color: C.textMuted,
+                    fontFamily: "inherit", fontSize: "13px", fontWeight: "500",
+                    cursor: "pointer", transition: "all 0.2s",
+                  }}>+ Ajouter une tâche</button>
+                </div>
+              </div>
+
+              <button onClick={() => setStep(3)} style={{
+                width: "100%", padding: "15px", background: C.green, border: "none",
+                borderRadius: "12px", color: "#fff",
+                fontFamily: "'Segoe UI', Arial, sans-serif", fontSize: "14px", fontWeight: "700",
+                cursor: "pointer", boxShadow: `0 3px 12px rgba(159,184,120,0.35)`,
+              }}>Suivant → Récapitulatif</button>
+            </div>
+          )}
+
+          {/* ═══════════════ ÉTAPE 3 ═══════════════ */}
+          {step === 3 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "18px" }}>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "18px" }}>
+
+                {/* Infos projet */}
+                <div style={cardShell}>
+                  <div style={cardHeader()}>
+                    <div style={iconBox()}>🔍</div>
+                    <div>
+                      <p style={{ fontSize: "14px", fontWeight: "700", color: C.text, margin: 0 }}>Récapitulatif du projet</p>
+                      <p style={{ fontSize: "12px", color: C.textMuted, margin: "2px 0 0" }}>Vérifiez les informations</p>
+                    </div>
+                  </div>
+                  <div style={{ padding: "22px 24px", display: "flex", flexDirection: "column", gap: "10px" }}>
+                    {[
+                      ["Titre",            title || "—"],
+                      ["Chef de projet",   selectedManager?.name || "Non assigné"],
+                      ["Date de début",    startDate || "—"],
+                      ["Date de fin",      endDate || "—"],
+                      ["Workload estimé",  workload ? `${workload} heures` : "—"],
+                      ["Généré par IA",    useAI ? "✅ Oui" : "Non"],
+                    ].map(([label, value]) => (
+                      <div key={label} style={{ background: C.bg, borderRadius: "10px", padding: "10px 14px", border: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <span style={{ fontSize: "11px", fontWeight: "700", textTransform: "uppercase", letterSpacing: "0.06em", color: C.textLight }}>{label}</span>
+                        <span style={{ fontSize: "13px", color: C.text, fontWeight: "600" }}>{value}</span>
+                      </div>
+                    ))}
+                    <div style={{ marginTop: "6px" }}>
+                      <p style={{ fontSize: "10px", fontWeight: "700", textTransform: "uppercase", letterSpacing: "0.08em", color: C.textLight, margin: "0 0 8px" }}>Description</p>
+                      <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: "10px", padding: "12px 14px", fontSize: "13px", color: C.textMuted, lineHeight: 1.7 }}>
+                        {correctedDesc || description || "—"}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* FIX: Tasks recap — white header, green icon, no pink bg */}
+                <div style={cardShell}>
+                  <div style={cardHeader()}>
+                    <div style={iconBox(C.green, "rgba(159,184,120,0.3)")}>📝</div>
+                    <div>
+                      <p style={{ fontSize: "14px", fontWeight: "700", color: C.text, margin: 0 }}>Tâches ({tasks.length})</p>
+                      <p style={{ fontSize: "12px", color: C.textMuted, margin: "2px 0 0" }}>Récapitulatif des tâches définies</p>
+                    </div>
+                  </div>
+                  <div style={{ padding: "16px 22px", display: "flex", flexDirection: "column", gap: "8px", maxHeight: "440px", overflowY: "auto" }}>
+                    {tasks.length === 0 ? (
+                      <p style={{ fontSize: "13px", color: C.textLight, fontStyle: "italic", textAlign: "center", padding: "24px 0" }}>Aucune tâche définie.</p>
+                    ) : tasks.map((task, i) => (
+                      <div key={task.id} style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: "10px", padding: "12px 14px" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                          <span style={{ width: "22px", height: "22px", borderRadius: "50%", background: C.greenLight, border: `1.5px solid ${C.greenMid}`, color: C.greenDark, fontSize: "11px", fontWeight: "700", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{i + 1}</span>
+                          <span style={{ flex: 1, fontSize: "13px", fontWeight: "600", color: C.text }}>{task.title || <em style={{ color: C.textLight, fontWeight: 400 }}>Sans titre</em>}</span>
+                          {task.estimatedHours && (
+                            <span style={{ fontSize: "11px", padding: "2px 10px", background: C.greenLight, border: `1px solid ${C.greenMid}`, borderRadius: "999px", color: C.greenDark, fontWeight: "700" }}>⏱ {task.estimatedHours}h</span>
+                          )}
+                        </div>
+                        {(task.description || task.startDate || task.dueDate) && (
+                          <div style={{ marginTop: "8px", paddingTop: "8px", borderTop: `1px solid #f0efe8`, paddingLeft: "32px" }}>
+                            {task.description && <p style={{ fontSize: "12px", color: C.textMuted, lineHeight: 1.6, margin: "0 0 4px" }}>{task.description}</p>}
+                            <div style={{ display: "flex", gap: "16px", fontSize: "11px", color: C.textLight }}>
+                              {task.startDate && <span>🗓 {task.startDate}</span>}
+                              {task.dueDate   && <span>🏁 {task.dueDate}</span>}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {createError && (
+                <p style={{ color: C.pinkDark, fontSize: "12px", background: C.green, padding: "10px 14px", borderRadius: "10px", border: `1px solid ${C.pinkMid}`, margin: 0 }}>⚠️ {createError}</p>
+              )}
+
+              <button onClick={handleCreate} disabled={creating} style={{
+                width: "100%", padding: "16px",
+                background: creating ? C.textLight : C.pink,
+                border: "none", borderRadius: "12px", color: "#fff",
+                fontFamily: "'Segoe UI',Arial,sans-serif", fontSize: "15px", fontWeight: "700",
+                cursor: creating ? "not-allowed" : "pointer",
+                boxShadow: `0 3px 12px rgba(159,184,120,0.3)`,
+                opacity: creating ? 0.6 : 1, transition: "opacity 0.2s",
+              }}>
+                {creating ? "⏳ Création en cours..." : " Valider et créer dans OpenProject"}
+              </button>
+            </div>
+          )}
+
         </div>
-      )}
+      </main>
+
+      <style>{`
+        input:focus, textarea:focus, select:focus {
+          border-color: #9FB878 !important;
+          box-shadow: 0 0 0 3px rgba(159,184,120,0.15) !important;
+          outline: none;
+        }
+      `}</style>
     </div>
+  );
+}
+
+/* ── Sidebar identique au Dashboard ── */
+function Sidebar({ user, navigate, handleLogout, C }) {
+  const path = window.location.pathname;
+  const navItems = [
+    { label: "Dashboard",   path: "/dashboard" },
+    { label: "Mes projets", path: "/projets"   },
+    { label: "Mes tâches",  path: "/taches"    },
+    { label: "Analyse IA",  path: "/ai"        },
+  ];
+  return (
+    <aside style={{ background: "#fff", borderRight: `1px solid ${C.border}`, padding: "24px 0", display: "flex", flexDirection: "column", justifyContent: "space-between", position: "sticky", top: 0, height: "100vh", overflowY: "auto", boxShadow: "2px 0 8px rgba(0,0,0,0.03)" }}>
+      <div>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px", padding: "0 20px 28px" }}>
+          <div style={{ width: "32px", height: "32px", borderRadius: "10px", background: C.green, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "16px", boxShadow: `0 2px 8px ${C.greenMid}` }}>🐝</div>
+          <span style={{ fontSize: "16px", fontWeight: "700", color: C.text }}>lightproject</span>
+        </div>
+        <div style={{ padding: "0 12px" }}>
+          {navItems.map(item => {
+            const active = path === item.path || (item.path === "/projets" && path.startsWith("/projets"));
+            return (
+              <div key={item.path} onClick={() => navigate(item.path)} style={{ padding: "10px 14px", borderRadius: "12px", fontSize: "13px", cursor: "pointer", marginBottom: "3px", color: active ? C.greenDark : C.textMuted, background: active ? C.greenLight : "transparent", fontWeight: active ? "600" : "400", borderLeft: active ? `3px solid ${C.green}` : "3px solid transparent", transition: "all 0.15s" }}>
+                {item.label}
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ height: "1px", background: C.border, margin: "16px" }} />
+        <div style={{ padding: "0 12px" }}>
+          <p style={{ fontSize: "10px", color: C.textLight, textTransform: "uppercase", letterSpacing: "1px", padding: "0 14px", margin: "0 0 6px" }}>Compte</p>
+          <div style={{ padding: "10px 14px", borderRadius: "12px", fontSize: "13px", color: C.textMuted, cursor: "pointer", marginBottom: "2px" }} onClick={() => navigate("/profil")}>Mon profil</div>
+          <div style={{ padding: "10px 14px", borderRadius: "12px", fontSize: "13px", color: C.pink, cursor: "pointer", fontWeight: "500" }} onClick={handleLogout}>Déconnexion</div>
+        </div>
+      </div>
+      <div style={{ margin: "0 16px" }}>
+        <div style={{ background: C.greenLight, borderRadius: "14px", padding: "12px", display: "flex", alignItems: "center", gap: "10px", border: `1px solid ${C.greenMid}` }}>
+          <div style={{ width: "36px", height: "36px", borderRadius: "50%", background: C.green, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "15px", fontWeight: "700", color: "#fff", flexShrink: 0, boxShadow: `0 2px 6px ${C.greenMid}` }}>
+            {user.name?.charAt(0)?.toUpperCase() || "A"}
+          </div>
+          <div>
+            <p style={{ fontSize: "13px", fontWeight: "600", color: C.text, margin: 0 }}>{user.name || "Admin"}</p>
+            <p style={{ fontSize: "11px", color: C.textMuted, margin: 0 }}>{user.isAdmin ? "Administrateur" : "Membre"}</p>
+          </div>
+        </div>
+      </div>
+    </aside>
   );
 }
