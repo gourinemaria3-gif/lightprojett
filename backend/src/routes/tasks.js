@@ -3,13 +3,18 @@
 // ══════════════════════════════════════════════════════════════════════════════
 //  Route — /api/tasks
 //
-//  Modèle budget v2 :
-//    • member_rate est dans task_extensions, PAS dans time_logs
-//    • addTimeLog ne prend plus de hourlyRate → le taux est déjà dans l'extension
-//    • updateEstimatedCostForTask vient de budgetService (plus de import cassé)
-//    • refreshBudgetForProject déclenché après chaque time log add/delete
+//  CORRECTIONS :
+//    - PATCH /:taskId : filtre les champs inconnus d'OP (percentageDone, etc.)
+//      pour éviter le 500 → OP retourne 422 sur champs non reconnus
+//    - PATCH /:taskId : lockVersion récupéré automatiquement si absent
+//    - PATCH /:taskId : meilleur message d'erreur avec détail OP
 // ══════════════════════════════════════════════════════════════════════════════
-
+const axios = require("axios");
+const BASE_URL = process.env.OP_BASE_URL;
+const makeAuthHeader = (opToken) => ({
+  Authorization: "Basic " + Buffer.from(`apikey:${opToken}`).toString("base64"),
+  "Content-Type": "application/json",
+});
 const express = require("express");
 const router  = express.Router();
 
@@ -48,8 +53,28 @@ function isOverdue(task) {
      "terminé", "terminée", "fermé", "fermée"]
       .includes((task._links?.status?.title || "").toLowerCase());
   if (isClosed) return false;
-  return new Date(task.dueDate) < new Date(new Date().toDateString());
+  // Comparaison string pour éviter décalage UTC
+  const due   = String(task.dueDate).slice(0, 10);
+  const now   = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}-${String(now.getDate()).padStart(2,"0")}`;
+  return due < today;
 }
+
+// ── CORRECTION : liste des champs acceptés par patchTask ─────────────────────
+//  OP refuse les champs inconnus avec une 422 silencieuse côté OP
+//  qui se transforme en 500 côté notre API car on ne l'intercepte pas.
+//  On whiteliste explicitement les champs qu'on sait gérer.
+const PATCH_ALLOWED_FIELDS = new Set([
+  "subject",
+  "description",
+  "startDate",
+  "dueDate",
+  "estimatedHours",
+  "assignee",
+  "status",
+  "lockVersion",
+  // percentageDone est géré séparément via OP si nécessaire
+]);
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  GET /api/tasks/:projectId
@@ -118,7 +143,6 @@ router.post("/project/:projectId", async (req, res) => {
       });
     }
 
-    // Notif assignation si la tâche est créée directement avec un assignee
     const newAssigneeId = created._links?.assignee?.href
       ? Number(created._links.assignee.href.split("/").pop())
       : null;
@@ -147,6 +171,13 @@ router.post("/project/:projectId", async (req, res) => {
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  PATCH /api/tasks/:taskId
+//
+//  CORRECTIONS :
+//    1. Filtre les champs non reconnus par OP avant d'appeler patchTask
+//       → évite les 422 OP silencieux qui causaient le 500
+//    2. Meilleure gestion d'erreur : on distingue 409 (lockVersion conflict),
+//       422 (validation OP), et les autres erreurs
+//    3. percentageDone : géré séparément si présent dans le body
 // ══════════════════════════════════════════════════════════════════════════════
 router.patch("/:taskId", async (req, res) => {
   const callerId          = req.user.userId;
@@ -174,17 +205,44 @@ router.patch("/:taskId", async (req, res) => {
   }
 
   try {
-    const { projectId: _removed, ...patchData } = req.body;
+    const { projectId: _removed, ...rawPatchData } = req.body;
 
-    const tasksBefore   = await getTasks(projectId, opToken);
-    const taskBefore    = tasksBefore.find((t) => String(t.id) === String(req.params.taskId));
-    const oldAssigneeId = taskBefore?._links?.assignee?.href
-      ? Number(taskBefore._links.assignee.href.split("/").pop())
-      : null;
+    // ── CORRECTION : filtrer les champs non supportés par OP ─────────────
+    //  percentageDone, type, priority, version, etc. ne se patchent pas
+    //  directement via work_packages PATCH → OP répond 422 → notre catch → 500
+    const patchData = {};
+    for (const key of Object.keys(rawPatchData)) {
+      if (PATCH_ALLOWED_FIELDS.has(key)) {
+        patchData[key] = rawPatchData[key];
+      } else {
+        console.log(`[PATCH tasks] Champ ignoré (non supporté par OP): "${key}"`);
+      }
+    }
+
+    // Récupère l'ancien assignee pour détecter le changement
+    let oldAssigneeId = null;
+    try {
+      const taskRes = await axios.get(
+        `${BASE_URL}/api/v3/work_packages/${req.params.taskId}`,
+        { headers: makeAuthHeader(opToken), timeout: 8000 }
+      );
+      oldAssigneeId = taskRes.data._links?.assignee?.href
+        ? Number(taskRes.data._links.assignee.href.split("/").pop())
+        : null;
+
+      // ── Si lockVersion absent du body, on le récupère depuis OP ─────────
+      //  Évite le 409 "Stale object" quand le frontend oublie de l'envoyer
+      if (patchData.lockVersion === undefined || patchData.lockVersion === null) {
+        patchData.lockVersion = taskRes.data.lockVersion;
+        console.log(`[PATCH tasks] lockVersion récupéré depuis OP: ${patchData.lockVersion}`);
+      }
+    } catch (e) {
+      console.warn("Impossible de récupérer la tâche actuelle:", e.message);
+    }
 
     const result = await patchTask(req.params.taskId, patchData, opToken);
 
-    // Notif assignation si l'assignee a changé
+    // Notif assignation si changée
     if (patchData.assignee !== undefined) {
       const newAssigneeId = result._links?.assignee?.href
         ? Number(result._links.assignee.href.split("/").pop())
@@ -200,7 +258,7 @@ router.patch("/:taskId", async (req, res) => {
       }
     }
 
-    // Notif retard si dueDate définie/changée et déjà dépassée
+    // Notif retard si dueDate définie et déjà dépassée
     if (patchData.dueDate !== undefined) {
       const assigneeId = result._links?.assignee?.href
         ? Number(result._links.assignee.href.split("/").pop())
@@ -216,7 +274,7 @@ router.patch("/:taskId", async (req, res) => {
       }
     }
 
-    // Recalcul coût estimé si estimatedHours change
+    // Recalcul coût estimé
     if (patchData.estimatedHours !== undefined) {
       let estimatedHours = patchData.estimatedHours;
       if (!estimatedHours && result.estimatedTime) {
@@ -226,14 +284,11 @@ router.patch("/:taskId", async (req, res) => {
         estimatedHours = days * 8 + hours;
       }
       if (estimatedHours) {
-        updateEstimatedCostForTask(req.params.taskId, {
-          estimatedHours,
-          projectId,
-        });
+        updateEstimatedCostForTask(req.params.taskId, { estimatedHours, projectId });
       }
     }
 
-    // Post-patch : propagation blocage + sync stats + alertes budget
+    // Post-patch async
     try {
       await Promise.all([
         patchData.status
@@ -247,11 +302,39 @@ router.patch("/:taskId", async (req, res) => {
     }
 
     res.json(result);
+
   } catch (error) {
-    console.error("Erreur patch tâche:", error.response?.data || error.message);
+    const opStatus = error.response?.status;
+    const opData   = error.response?.data;
+
+    console.error(`[PATCH tasks] Erreur OP status=${opStatus}:`, JSON.stringify(opData, null, 2));
+
+    // ── Erreurs OP spécifiques → messages utiles côté client ─────────────
+    if (opStatus === 409) {
+      return res.status(409).json({
+        message: "Conflit de version : la tâche a été modifiée entre-temps. Veuillez rafraîchir.",
+        detail: opData,
+      });
+    }
+    if (opStatus === 422) {
+      const opMessage = opData?._embedded?.errors?.map(e => e.message).join(", ")
+                     || opData?.message
+                     || "Données invalides.";
+      return res.status(422).json({
+        message: `OpenProject a rejeté la mise à jour : ${opMessage}`,
+        detail: opData,
+      });
+    }
+    if (opStatus === 403) {
+      return res.status(403).json({
+        message: "OpenProject a refusé cette modification (droits insuffisants).",
+        detail: opData,
+      });
+    }
+
     res.status(500).json({
       message: "Erreur mise à jour tâche.",
-      detail:  error.response?.data || error.message,
+      detail:  opData || error.message,
     });
   }
 });
@@ -299,15 +382,6 @@ router.delete("/:taskId", async (req, res) => {
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  POST /api/tasks/:taskId/timelogs
-//
-//  MODÈLE BUDGET V2 :
-//    Le taux (member_rate) est stocké dans task_extensions, PAS dans time_logs.
-//    addTimeLog n'a donc plus besoin de hourlyRate.
-//    Le coût réel est recalculé automatiquement par refreshActualCost()
-//    qui lit task_extensions.member_rate.
-//
-//    Accès manager/admin pour saisir les heures pour n'importe quel membre.
-//    Accès membre pour saisir SES propres heures (limité à son opUserId).
 // ══════════════════════════════════════════════════════════════════════════════
 router.post("/:taskId/timelogs", async (req, res) => {
   const callerId   = req.user.userId;

@@ -60,12 +60,17 @@ export async function requestPushPermission() {
       return null;
     }
 
-    const swReg = await navigator.serviceWorker.register("/firebase-messaging-sw.js");
+    let swReg;
+try {
+  swReg = await navigator.serviceWorker.register("/firebase-messaging-sw.js");
+} catch {
+  swReg = await navigator.serviceWorker.ready;
+}
 
-    const token = await getToken(messaging, {
-      vapidKey:                  VAPID_KEY,
-      serviceWorkerRegistration: swReg,
-    });
+const token = await getToken(messaging, {
+  vapidKey:                  VAPID_KEY,
+  serviceWorkerRegistration: swReg,
+});
 
     if (!token) {
       console.warn("[FCM] Token FCM vide.");

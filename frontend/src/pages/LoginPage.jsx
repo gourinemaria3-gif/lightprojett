@@ -3,7 +3,7 @@ import "./LoginPage.css";
 import { requestPushPermission } from "../services/firebase";
 import beeMascot from "../assets/beee_mascot.png";
 
-const BASE_URL = process.env.REACT_APP_API_URL || "http://localhost:5000";
+const BASE_URL = process.env.REACT_APP_API_URL || "https://localhost:5001";
 
 export default function LoginPage({ onLogin }) {
   const [token,    setToken]    = useState("");
@@ -19,11 +19,12 @@ export default function LoginPage({ onLogin }) {
     setError(null);
 
     try {
-      const res = await fetch(`${BASE_URL}/api/auth/login`, {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ token: token.trim() }),
-      });
+      const deviceId = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) ? "mobile" : "web";
+const res = await fetch(`${BASE_URL}/api/auth/login`, {
+  method:  "POST",
+  headers: { "Content-Type": "application/json" },
+  body:    JSON.stringify({ token: token.trim(), deviceId }),
+});
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || "Erreur de connexion.");
 

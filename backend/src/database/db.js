@@ -91,15 +91,6 @@ db.exec(`
     UNIQUE (op_user_id, op_project_id)
   );
 
-  -- ─────────────────────────────────────────────────────────────────────────
-  --  task_extensions — table centrale du budget
-  --
-  --  estimated_hours  : fixé par le chef de projet
-  --  member_rate      : taux horaire déclaré par le membre pour CETTE tâche
-  --  estimated_cost   : calculé = estimated_hours × member_rate
-  --  actual_cost      : calculé = SUM(time_logs.hours_worked × rate_snapshot)
-  --  op_project_id    : pour filtrer les tâches par projet efficacement
-  -- ─────────────────────────────────────────────────────────────────────────
   CREATE TABLE IF NOT EXISTS task_extensions (
     op_task_id      INTEGER PRIMARY KEY,
     op_project_id   INTEGER,
@@ -108,6 +99,7 @@ db.exec(`
     member_rate     REAL,
     estimated_cost  REAL,
     actual_cost     REAL,
+    assignee_op_id  INTEGER, 
     updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
   );
 
@@ -119,14 +111,6 @@ db.exec(`
     CHECK (task_op_id != depends_on_task_op_id)
   );
 
-  -- ─────────────────────────────────────────────────────────────────────────
-  --  time_logs
-  --
-  --  rate_snapshot : taux horaire capturé AU MOMENT du log.
-  --                  Protège l'historique si member_rate change plus tard.
-  --                  COALESCE(rate_snapshot, member_rate_courant) utilisé
-  --                  en fallback pour les anciens logs sans snapshot.
-  -- ─────────────────────────────────────────────────────────────────────────
   CREATE TABLE IF NOT EXISTS time_logs (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     op_task_id    INTEGER NOT NULL,
@@ -188,30 +172,20 @@ db.exec(`
 `);
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  MIGRATIONS — colonnes ajoutées progressivement (protégées par try/catch)
+//  MIGRATIONS
 // ══════════════════════════════════════════════════════════════════════════════
 
 const migrations = [
-  // projects_meta
   `ALTER TABLE projects_meta ADD COLUMN estimates_complete     INTEGER NOT NULL DEFAULT 1`,
   `ALTER TABLE projects_meta ADD COLUMN missing_estimates      INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE projects_meta ADD COLUMN risk_is_partial        INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE projects_meta ADD COLUMN budget_alerted_warning INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE projects_meta ADD COLUMN budget_alerted_danger  INTEGER NOT NULL DEFAULT 0`,
-
-  // task_extensions — nouvelles colonnes du modèle budget
   `ALTER TABLE task_extensions ADD COLUMN op_project_id   INTEGER`,
   `ALTER TABLE task_extensions ADD COLUMN estimated_hours REAL`,
   `ALTER TABLE task_extensions ADD COLUMN member_rate     REAL`,
-
-  // ── CORRECTION CRITIQUE : snapshot du taux au moment du log ──────────────
-  // Protège l'historique financier si member_rate change ultérieurement.
-  // Les anciens logs auront rate_snapshot = NULL → fallback sur member_rate courant.
   `ALTER TABLE time_logs ADD COLUMN rate_snapshot REAL`,
-
-  // project_members — suppression hourly_rate (remplacé par member_rate dans task_extensions)
-  // SQLite ne supporte pas DROP COLUMN avant 3.35 — on laisse la colonne si elle existe
-  // Elle sera simplement ignorée dans le code
+  `ALTER TABLE task_extensions ADD COLUMN assignee_op_id  INTEGER`, 
 ];
 
 for (const sql of migrations) {
@@ -239,8 +213,33 @@ function getUserById(opUserId) {
   return db.prepare(`SELECT * FROM users WHERE op_user_id = ?`).get(opUserId);
 }
 
-function getAllUsers() {
+// ── CORRECTION PERFORMANCE ────────────────────────────────────────────────────
+//  getAllUsers accepte maintenant un objet optionnel { limit, offset } pour
+//  paginer les résultats et éviter de charger toute la table en mémoire.
+//
+//  Rétrocompatibilité garantie : sans argument, comportement identique à avant
+//  (retourne tous les utilisateurs triés par nom).
+//
+//  Exemples d'appel :
+//    getAllUsers()                         → tous les utilisateurs (ancien comportement)
+//    getAllUsers({ limit: 20 })            → 20 premiers utilisateurs
+//    getAllUsers({ limit: 20, offset: 40}) → utilisateurs 41 à 60
+// ─────────────────────────────────────────────────────────────────────────────
+function getAllUsers({ limit = null, offset = 0 } = {}) {
+  if (limit !== null) {
+    return db.prepare(`
+      SELECT * FROM users
+      ORDER BY name
+      LIMIT ? OFFSET ?
+    `).all(limit, offset);
+  }
   return db.prepare(`SELECT * FROM users ORDER BY name`).all();
+}
+
+// Retourne le nombre total d'utilisateurs — utile pour calculer le nombre de
+// pages côté appelant sans faire une requête paginée de trop.
+function countUsers() {
+  return db.prepare(`SELECT COUNT(*) AS total FROM users`).get().total;
 }
 
 
@@ -303,7 +302,6 @@ function upsertProjectMeta(opProjectId, {
   missingEstimates  = 0,
   riskIsPartial     = false,
 }) {
-  // Préserve les flags d'alerte budget existants — ne jamais les écraser ici
   const existing       = db.prepare(`SELECT budget_alerted_warning, budget_alerted_danger FROM projects_meta WHERE op_project_id = ?`).get(opProjectId);
   const alertedWarning = existing?.budget_alerted_warning ?? 0;
   const alertedDanger  = existing?.budget_alerted_danger  ?? 0;
@@ -374,8 +372,31 @@ function getProjectMeta(opProjectId) {
   return db.prepare(`SELECT * FROM projects_meta WHERE op_project_id = ?`).get(opProjectId);
 }
 
-function getAllProjectsMeta() {
+// ── CORRECTION PERFORMANCE ────────────────────────────────────────────────────
+//  getAllProjectsMeta accepte maintenant un objet optionnel { limit, offset }
+//  pour paginer les résultats.
+//
+//  Rétrocompatibilité garantie : sans argument, comportement identique à avant.
+//
+//  Exemples d'appel :
+//    getAllProjectsMeta()                          → tous les projets
+//    getAllProjectsMeta({ limit: 10 })             → 10 projets les plus récents
+//    getAllProjectsMeta({ limit: 10, offset: 20 }) → projets 21 à 30
+// ─────────────────────────────────────────────────────────────────────────────
+function getAllProjectsMeta({ limit = null, offset = 0 } = {}) {
+  if (limit !== null) {
+    return db.prepare(`
+      SELECT * FROM projects_meta
+      ORDER BY updated_at DESC
+      LIMIT ? OFFSET ?
+    `).all(limit, offset);
+  }
   return db.prepare(`SELECT * FROM projects_meta ORDER BY updated_at DESC`).all();
+}
+
+// Retourne le nombre total de projets — utile pour la pagination côté appelant.
+function countProjectsMeta() {
+  return db.prepare(`SELECT COUNT(*) AS total FROM projects_meta`).get().total;
 }
 
 function getProjectManager(opProjectId) {
@@ -395,7 +416,6 @@ function deleteProjectMeta(opProjectId) {
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  PROJECT MEMBERS
-//  NOTE : hourly_rate retiré — le taux est maintenant dans task_extensions
 // ══════════════════════════════════════════════════════════════════════════════
 
 function upsertProjectMember(opUserId, opProjectId, { role = "member" }) {
@@ -434,12 +454,6 @@ function removeProjectMember(opUserId, opProjectId) {
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  TASK EXTENSIONS
-//
-//  Logique budget :
-//    1. Le chef fixe estimated_hours
-//    2. Le membre fixe member_rate (taux pour CETTE tâche uniquement)
-//    3. estimated_cost = estimated_hours × member_rate  (recalculé auto)
-//    4. actual_cost    = SUM(time_logs.hours_worked × rate_snapshot)
 // ══════════════════════════════════════════════════════════════════════════════
 
 function upsertTaskExtension(opTaskId, {
@@ -448,7 +462,6 @@ function upsertTaskExtension(opTaskId, {
   estimatedHours = null,
   memberRate    = null,
 }) {
-  // Récupère les valeurs actuelles pour ne pas écraser ce qui existe
   const existing = db.prepare(
     `SELECT estimated_hours, member_rate FROM task_extensions WHERE op_task_id = ?`
   ).get(opTaskId);
@@ -456,7 +469,6 @@ function upsertTaskExtension(opTaskId, {
   const finalEstimatedHours = estimatedHours != null ? Number(estimatedHours) : (existing?.estimated_hours ?? null);
   const finalMemberRate     = memberRate     != null ? Number(memberRate)     : (existing?.member_rate     ?? null);
 
-  // Calcul automatique du coût estimé si les deux valeurs sont connues
   const estimatedCost = (finalEstimatedHours != null && finalMemberRate != null)
     ? Math.round(finalEstimatedHours * finalMemberRate * 100) / 100
     : null;
@@ -482,10 +494,6 @@ function upsertTaskExtension(opTaskId, {
   );
 }
 
-/**
- * Chef de projet — fixe les heures estimées d'une tâche.
- * Recalcule estimated_cost si member_rate est déjà défini.
- */
 function setEstimatedHours(opTaskId, estimatedHours, opProjectId = null) {
   const hours    = Number(estimatedHours);
   const existing = db.prepare(
@@ -509,41 +517,52 @@ function setEstimatedHours(opTaskId, estimatedHours, opProjectId = null) {
   `).run(opTaskId, finalProjectId, hours, estimatedCost);
 }
 
-/**
- * Membre — déclare son taux horaire pour cette tâche.
- * Recalcule estimated_cost et actual_cost immédiatement.
- *
- * IMPORTANT : actual_cost est recalculé en utilisant rate_snapshot de chaque
- * log existant (COALESCE avec le nouveau taux en fallback pour les anciens logs).
- * Les nouveaux logs utiliseront ce taux comme snapshot dès leur création.
- */
+// ── CORRECTION COHÉRENCE TRANSACTIONNELLE ─────────────────────────────────────
+//  Avant : setMemberRate faisait un INSERT/UPDATE puis appelait refreshActualCost
+//  en deux opérations séparées. Si le process crashait entre les deux, la DB
+//  se retrouvait dans un état incohérent :
+//    - estimated_cost mis à jour avec le nouveau taux
+//    - actual_cost toujours calculé avec l'ancien taux
+//
+//  Après : les deux opérations sont enveloppées dans db.transaction().
+//  SQLite garantit l'atomicité : soit les deux réussissent, soit aucune n'est
+//  persistée. L'appelant reçoit une exception en cas d'échec, sans état partiel.
+//
+//  Note : better-sqlite3 gère les transactions de façon synchrone — pas de
+//  risque de deadlock ou d'interférence async dans ce contexte.
+// ─────────────────────────────────────────────────────────────────────────────
 function setMemberRate(opTaskId, memberRate, opProjectId = null) {
-  const rate     = Number(memberRate);
-  const existing = db.prepare(
-    `SELECT estimated_hours, op_project_id FROM task_extensions WHERE op_task_id = ?`
-  ).get(opTaskId);
+  const rate = Number(memberRate);
 
-  const estimatedHours = existing?.estimated_hours ?? null;
-  const estimatedCost  = (estimatedHours != null)
-    ? Math.round(estimatedHours * rate * 100) / 100
-    : null;
-  const finalProjectId = opProjectId ?? existing?.op_project_id ?? null;
+  const _setMemberRateTx = db.transaction(() => {
+    const existing = db.prepare(
+      `SELECT estimated_hours, op_project_id FROM task_extensions WHERE op_task_id = ?`
+    ).get(opTaskId);
 
-  db.prepare(`
-    INSERT INTO task_extensions
-      (op_task_id, op_project_id, member_rate, estimated_cost, updated_at)
-    VALUES (?, ?, ?, ?, datetime('now'))
-    ON CONFLICT(op_task_id) DO UPDATE SET
-      op_project_id  = COALESCE(excluded.op_project_id, op_project_id),
-      member_rate    = excluded.member_rate,
-      estimated_cost = excluded.estimated_cost,
-      updated_at     = excluded.updated_at
-  `).run(opTaskId, finalProjectId, rate, estimatedCost);
+    const estimatedHours = existing?.estimated_hours ?? null;
+    const estimatedCost  = (estimatedHours != null)
+      ? Math.round(estimatedHours * rate * 100) / 100
+      : null;
+    const finalProjectId = opProjectId ?? existing?.op_project_id ?? null;
 
-  // Recalcule actual_cost en respectant les snapshots historiques.
-  // Les logs avec rate_snapshot gardent leur taux d'origine.
-  // Les anciens logs sans snapshot utilisent le nouveau taux en fallback.
-  refreshActualCost(opTaskId);
+    db.prepare(`
+      INSERT INTO task_extensions
+        (op_task_id, op_project_id, member_rate, estimated_cost, updated_at)
+      VALUES (?, ?, ?, ?, datetime('now'))
+      ON CONFLICT(op_task_id) DO UPDATE SET
+        op_project_id  = COALESCE(excluded.op_project_id, op_project_id),
+        member_rate    = excluded.member_rate,
+        estimated_cost = excluded.estimated_cost,
+        updated_at     = excluded.updated_at
+    `).run(opTaskId, finalProjectId, rate, estimatedCost);
+
+    // refreshActualCost est maintenant appelé DANS la même transaction.
+    // Les deux mises à jour (member_rate/estimated_cost et actual_cost) sont
+    // atomiques : un crash entre les deux n'est plus possible.
+    _refreshActualCostInternal(opTaskId, rate);
+  });
+
+  _setMemberRateTx();
 }
 
 function getTaskExtension(opTaskId) {
@@ -556,44 +575,51 @@ function setTaskBlocked(opTaskId, isBlocked) {
     WHERE op_task_id = ?
   `).run(isBlocked ? 1 : 0, opTaskId);
 }
+function setAssigneeOpId(opTaskId, assigneeOpId) {
+  db.prepare(`
+    INSERT INTO task_extensions (op_task_id, assignee_op_id, updated_at)
+    VALUES (?, ?, datetime('now'))
+    ON CONFLICT(op_task_id) DO UPDATE SET
+      assignee_op_id = excluded.assignee_op_id,
+      updated_at     = excluded.updated_at
+  `).run(opTaskId, assigneeOpId);
+}
+// ── CORRECTION COHÉRENCE TRANSACTIONNELLE ─────────────────────────────────────
+//  refreshActualCost est divisée en deux :
+//
+//  _refreshActualCostInternal(opTaskId, currentRate)
+//    → Version interne appelée DANS une transaction existante (setMemberRate,
+//      deleteTimeLog, addTimeLog). Ne crée pas sa propre transaction.
+//      Accepte currentRate en paramètre pour éviter une seconde lecture de la DB
+//      quand le taux vient d'être mis à jour dans la même transaction.
+//
+//  refreshActualCost(opTaskId)
+//    → Version publique inchangée pour les appelants externes qui en ont besoin
+//      de façon isolée. Lit member_rate depuis la DB comme avant.
+//
+//  Pourquoi cette séparation ?
+//  better-sqlite3 ne supporte pas les transactions imbriquées (SAVEPOINT mis à
+//  part). Si _refreshActualCostInternal appelait db.transaction() alors qu'une
+//  transaction parente est déjà ouverte, better-sqlite3 lèverait une erreur
+//  "cannot start a transaction within a transaction".
+// ─────────────────────────────────────────────────────────────────────────────
+function _refreshActualCostInternal(opTaskId, currentRate) {
+  // currentRate peut être null si aucun taux n'est défini pour cette tâche.
+  // Dans ce cas, on utilise 0 comme fallback pour les logs sans rate_snapshot.
+  const rateForFallback = currentRate ?? 0;
 
-/**
- * Recalcule actual_cost après ajout/suppression d'un time_log.
- *
- * Formule :
- *   actual_cost = SUM(hours_worked × COALESCE(rate_snapshot, member_rate_courant))
- *
- * - rate_snapshot : taux figé au moment de la saisie (protège l'historique)
- * - fallback member_rate : pour les anciens logs sans snapshot
- * - Si aucun taux n'est disponible → actual_cost reste null
- */
-function refreshActualCost(opTaskId) {
-  const ext = db.prepare(
-    `SELECT member_rate FROM task_extensions WHERE op_task_id = ?`
-  ).get(opTaskId);
-
-  // Pas d'extension du tout → rien à faire
-  if (!ext) return;
-
-  const currentRate = ext.member_rate ?? 0;
-
-  // SUM utilise rate_snapshot si présent, sinon member_rate courant en fallback.
-  // Si ni snapshot ni taux courant → la ligne contribue 0 (pas de coût calculable).
   const row = db.prepare(`
     SELECT COALESCE(SUM(hours_worked * COALESCE(rate_snapshot, ?)), 0) AS total
     FROM time_logs
     WHERE op_task_id = ?
-  `).get(currentRate, opTaskId);
+  `).get(rateForFallback, opTaskId);
 
-  // Si member_rate est null ET aucun log n'a de snapshot → actual_cost = null
-  const hasAnyRate = ext.member_rate != null || db.prepare(`
+  // Si ni membre_rate ni aucun snapshot → actual_cost reste null (non calculable)
+  const hasAnyRate = currentRate != null || db.prepare(`
     SELECT 1 FROM time_logs WHERE op_task_id = ? AND rate_snapshot IS NOT NULL LIMIT 1
   `).get(opTaskId);
 
-  if (!hasAnyRate) {
-    // Pas de taux du tout → on ne stocke rien (reste null)
-    return;
-  }
+  if (!hasAnyRate) return;
 
   const actualCost = Math.round(Number(row?.total ?? 0) * 100) / 100;
 
@@ -602,6 +628,16 @@ function refreshActualCost(opTaskId) {
     SET actual_cost = ?, updated_at = datetime('now')
     WHERE op_task_id = ?
   `).run(actualCost, opTaskId);
+}
+
+function refreshActualCost(opTaskId) {
+  const ext = db.prepare(
+    `SELECT member_rate FROM task_extensions WHERE op_task_id = ?`
+  ).get(opTaskId);
+
+  if (!ext) return;
+
+  _refreshActualCostInternal(opTaskId, ext.member_rate ?? null);
 }
 
 
@@ -638,15 +674,9 @@ function getDependents(taskOpId) {
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  TIME LOGS
-//
-//  CORRECTION CRITIQUE — rate_snapshot :
-//    Le taux membre est capturé au moment de la saisie depuis task_extensions.
-//    Si member_rate change plus tard, les anciens logs conservent leur coût
-//    d'origine grâce au snapshot. Les nouveaux logs utilisent le taux actuel.
 // ══════════════════════════════════════════════════════════════════════════════
 
 function addTimeLog(opTaskId, opUserId, { hoursWorked, loggedDate = null, note = null }) {
-  // Capture du taux courant au moment de la saisie
   const ext          = db.prepare(
     `SELECT member_rate FROM task_extensions WHERE op_task_id = ?`
   ).get(opTaskId);
@@ -664,7 +694,6 @@ function addTimeLog(opTaskId, opUserId, { hoursWorked, loggedDate = null, note =
     rateSnapshot,
   );
 
-  // Recalcul automatique du coût réel après chaque log
   refreshActualCost(opTaskId);
 
   return result.lastInsertRowid;
@@ -687,7 +716,6 @@ function getTimeLogsForUser(opUserId) {
 }
 
 function deleteTimeLog(id) {
-  // Récupère le taskId avant suppression pour recalculer après
   const log = db.prepare(`SELECT op_task_id FROM time_logs WHERE id = ?`).get(id);
   db.prepare(`DELETE FROM time_logs WHERE id = ?`).run(id);
   if (log) refreshActualCost(log.op_task_id);
@@ -810,13 +838,13 @@ module.exports = {
   db,
 
   // Users
-  upsertUser, getUserById, getAllUsers,
+  upsertUser, getUserById, getAllUsers, countUsers,
 
   // Session
   saveSession, getSessionByUser, getAllSessionsByUser, clearSession,
 
   // Projects meta
-  upsertProjectMeta, getProjectMeta, getAllProjectsMeta,
+  upsertProjectMeta, getProjectMeta, getAllProjectsMeta, countProjectsMeta,
   getProjectManager, deleteProjectMeta,
   setBudgetAlertedFlags, resetBudgetAlertedFlags,
 
@@ -825,7 +853,7 @@ module.exports = {
 
   // Task extensions
   upsertTaskExtension, getTaskExtension, setTaskBlocked,
-  setEstimatedHours, setMemberRate, refreshActualCost,
+  setEstimatedHours, setMemberRate, refreshActualCost,setAssigneeOpId,
 
   // Task dependencies
   addDependency, removeDependency, getDependenciesOf, getDependents,

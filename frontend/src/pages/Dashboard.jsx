@@ -1,11 +1,290 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { fetchProjects, fetchStats, fetchMembers, fetchTasks } from "../services/api";
+import {
+  fetchNotifications,
+  fetchNotificationCount,
+  markNotificationRead,
+  markAllNotificationsRead,
+  deleteNotification,
+  clearReadNotifications,
+} from "../services/api";
 
-const isDone = t => ["clos","done","termin"].some(k => (t._links?.status?.title||"").toLowerCase().includes(k));
-  const isInProgress = t => ["progress","cours"].some(k => (t._links?.status?.title||"").toLowerCase().includes(k));
-  const isTodo = t => !isDone(t) && !isInProgress(t);
-  
+// ─────────────────────────────────────────────────────────────────────────────
+//  Helpers statut
+// ─────────────────────────────────────────────────────────────────────────────
+const isDone       = t => ["clos","done","termin"].some(k => (t._links?.status?.title||"").toLowerCase().includes(k));
+const isInProgress = t => ["progress","cours"].some(k => (t._links?.status?.title||"").toLowerCase().includes(k));
+const isTodo       = t => !isDone(t) && !isInProgress(t);
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  NotificationBell — intégré directement (palette verte)
+// ─────────────────────────────────────────────────────────────────────────────
+const NOTIF_CONFIG = {
+  assigned:     { icon: "👤", color: "#5a8ac4", label: "Assignée" },
+  due_soon:     { icon: "🔔", color: "#d4874a", label: "Échéance proche" },
+  overdue:      { icon: "⚠️", color: "#b23a3a", label: "En retard" },
+  blocked:      { icon: "🔒", color: "#b23a3a", label: "Bloquée" },
+  unblocked:    { icon: "✅", color: "#9FB878", label: "Débloquée" },
+  danger:       { icon: "🚨", color: "#b23a3a", label: "Danger" },
+  budget_alert: { icon: "💸", color: "#d4874a", label: "Budget" },
+};
+
+function timeAgo(dateStr) {
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const min  = Math.floor(diff / 60000);
+  const h    = Math.floor(diff / 3600000);
+  const d    = Math.floor(diff / 86400000);
+  if (min < 1)  return "À l'instant";
+  if (min < 60) return `Il y a ${min} min`;
+  if (h < 24)   return `Il y a ${h}h`;
+  if (d < 7)    return `Il y a ${d}j`;
+  return new Date(dateStr).toLocaleDateString("fr-FR", { day: "2-digit", month: "short" });
+}
+
+function NotificationBell({ C }) {
+    const navigate  = useNavigate();
+  const [open,    setOpen]    = useState(false);
+  const [notifs,  setNotifs]  = useState([]);
+  const [count,   setCount]   = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [filter,  setFilter]  = useState("all");
+  const ref = useRef(null);
+
+  useEffect(() => {
+    function handleClick(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, []);
+
+  const loadCount = useCallback(async () => {
+    try { setCount(await fetchNotificationCount()); } catch {}
+  }, []);
+
+  useEffect(() => {
+    loadCount();
+    const id = setInterval(loadCount, 30000);
+    return () => clearInterval(id);
+  }, [loadCount]);
+
+  const loadNotifs = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await fetchNotifications({ unreadOnly: filter === "unread" });
+      setNotifs(data.notifications ?? []);
+    } catch {}
+    finally { setLoading(false); }
+  }, [filter]);
+
+  useEffect(() => { if (open) loadNotifs(); }, [open, loadNotifs]);
+
+  async function handleMarkRead(id) {
+    await markNotificationRead(id);
+    setNotifs(prev => prev.map(n => n.id === id ? { ...n, is_read: 1 } : n));
+    setCount(c => Math.max(0, c - 1));
+  }
+  async function handleMarkAll() {
+    await markAllNotificationsRead();
+    setNotifs(prev => prev.map(n => ({ ...n, is_read: 1 })));
+    setCount(0);
+  }
+  async function handleDelete(id, wasUnread) {
+    await deleteNotification(id);
+    setNotifs(prev => prev.filter(n => n.id !== id));
+    if (wasUnread) setCount(c => Math.max(0, c - 1));
+  }
+  async function handleClearRead() {
+    await clearReadNotifications();
+    setNotifs(prev => prev.filter(n => n.is_read === 0));
+  }
+
+  const displayed = filter === "unread" ? notifs.filter(n => n.is_read === 0) : notifs;
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      {/* Cloche */}
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          position: "relative",
+          background: open ? C.greenLight : "#fff",
+          border: `1px solid ${open ? C.greenMid : C.border}`,
+          borderRadius: "999px",
+          width: "36px", height: "36px",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          cursor: "pointer", fontSize: "16px",
+          boxShadow: C.shadow,
+          transition: "background 0.2s, border-color 0.2s",
+        }}
+        title="Notifications"
+      >
+        🔔
+        {count > 0 && (
+          <span style={{
+            position: "absolute", top: "-5px", right: "-5px",
+            background: "#b23a3a", color: "#fff",
+            fontSize: "9px", fontWeight: "700",
+            borderRadius: "10px", minWidth: "16px", height: "16px",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            padding: "0 3px", border: "2px solid #f6f6f2",
+          }}>
+            {count > 99 ? "99+" : count}
+          </span>
+        )}
+      </button>
+
+      {/* Dropdown */}
+      {open && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 10px)", right: 0,
+          width: "360px", maxHeight: "500px",
+          background: "#fff", border: `1px solid ${C.border}`,
+          borderRadius: "18px", boxShadow: "0 12px 40px rgba(0,0,0,0.12)",
+          display: "flex", flexDirection: "column", overflow: "hidden",
+          zIndex: 9999, fontFamily: "'Segoe UI', Arial, sans-serif",
+        }}>
+          {/* Header */}
+          <div style={{
+            padding: "14px 16px 10px",
+            borderBottom: `1px solid ${C.border}`,
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            flexShrink: 0,
+          }}>
+            <span style={{ fontWeight: 700, fontSize: 14, color: C.text }}>
+              Notifications
+              {count > 0 && (
+                <span style={{
+                  background: "#b23a3a", color: "#fff",
+                  fontSize: 10, borderRadius: "10px",
+                  padding: "1px 6px", marginLeft: 6,
+                }}>{count}</span>
+              )}
+            </span>
+            <div style={{ display: "flex", gap: 6 }}>
+              {count > 0 && (
+                <button onClick={handleMarkAll} style={notifGhostBtn(C.blue)}>Tout lire</button>
+              )}
+              <button onClick={handleClearRead} style={notifGhostBtn("#b23a3a")}>Vider</button>
+            </div>
+          </div>
+
+          {/* Filtres */}
+          <div style={{
+            display: "flex", gap: 4, padding: "8px 12px",
+            borderBottom: `1px solid ${C.border}`, flexShrink: 0,
+          }}>
+            {["all","unread"].map(f => (
+              <button key={f} onClick={() => setFilter(f)} style={{
+                background: filter === f ? C.greenLight : "transparent",
+                border: `1px solid ${filter === f ? C.greenMid : "transparent"}`,
+                borderRadius: "7px", color: filter === f ? C.greenDark : C.textMuted,
+                fontSize: 11, fontWeight: 600, padding: "3px 10px",
+                cursor: "pointer", transition: "all 0.15s",
+              }}>
+                {f === "all" ? "Toutes" : "Non lues"}
+              </button>
+            ))}
+          </div>
+
+          {/* Liste */}
+          <div style={{ overflowY: "auto", flex: 1 }}>
+            {loading ? (
+              <div style={{ padding: 32, textAlign: "center", color: C.textLight, fontSize: 13 }}>
+                Chargement…
+              </div>
+            ) : displayed.length === 0 ? (
+              <div style={{ padding: "36px 20px", textAlign: "center" }}>
+                <div style={{ fontSize: 28, marginBottom: 8 }}>🎉</div>
+                <div style={{ color: C.textMuted, fontSize: 13 }}>
+                  {filter === "unread" ? "Aucune notification non lue." : "Aucune notification."}
+                </div>
+              </div>
+            ) : displayed.map(n => {
+              const cfg = NOTIF_CONFIG[n.type] || { icon: "📌", color: C.blue, label: "Info" };
+              return (
+                <div
+                  key={n.id}
+                  onClick={() => n.is_read === 0 && handleMarkRead(n.id)}
+                  style={{
+                    display: "flex", alignItems: "flex-start", gap: 10,
+                    padding: "11px 14px",
+                    borderBottom: `1px solid ${C.border}`,
+                    background: n.is_read === 0 ? C.greenLight : "transparent",
+                    cursor: n.is_read === 0 ? "pointer" : "default",
+                    transition: "background 0.15s",
+                  }}
+                >
+                  <div style={{
+                    width: 30, height: 30, borderRadius: "8px",
+                    background: cfg.color + "18", border: `1px solid ${cfg.color}33`,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    fontSize: 14, flexShrink: 0,
+                  }}>{cfg.icon}</div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 10, fontWeight: 700, color: cfg.color, marginBottom: 2, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                      {cfg.label}
+                      {n.is_read === 0 && (
+                        <span style={{ display: "inline-block", width: 5, height: 5, borderRadius: "50%", background: "#b23a3a", marginLeft: 5, verticalAlign: "middle" }}/>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 12, color: n.is_read === 0 ? C.text : C.textMuted, lineHeight: 1.5, wordBreak: "break-word" }}>
+                      {n.message}
+                    </div>
+                    <div style={{ fontSize: 10, color: C.textLight, marginTop: 4 }}>{timeAgo(n.created_at)}</div>
+                  </div>
+                  <button
+                    onClick={e => { e.stopPropagation(); handleDelete(n.id, n.is_read === 0); }}
+                    style={{ background: "none", border: "none", color: C.textLight, cursor: "pointer", fontSize: 13, padding: "1px 3px", borderRadius: 4, flexShrink: 0 }}
+                    title="Supprimer"
+                  >✕</button>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Footer */}
+          <div style={{ padding: "10px 16px", borderTop: `1px solid ${C.border}`, textAlign: "center", flexShrink: 0 }}>
+            <button
+
+  onClick={() => { setOpen(false); navigate("/notifications"); }}
+
+  style={{
+
+    background: "none", border: "none", color: C.textMuted,
+
+    fontSize: 11, cursor: "pointer", transition: "color 0.15s",
+
+  }}
+
+  onMouseEnter={e => e.currentTarget.style.color = C.greenDark}
+
+  onMouseLeave={e => e.currentTarget.style.color = C.textMuted}
+
+>
+
+  ⚙️ Paramètres de notifications
+
+</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function notifGhostBtn(color) {
+  return {
+    background: "transparent", border: `1px solid ${color}44`,
+    borderRadius: "7px", color, fontSize: 10, fontWeight: 600,
+    padding: "2px 8px", cursor: "pointer", transition: "background 0.15s",
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Dashboard
+// ─────────────────────────────────────────────────────────────────────────────
 export default function Dashboard() {
   const [projets, setProjets] = useState([]);
   const [statsMap, setStatsMap] = useState({});
@@ -17,61 +296,58 @@ export default function Dashboard() {
   const user = JSON.parse(localStorage.getItem("user") || "{}");
 
   useEffect(() => {
-     Promise.all([fetchProjects(), fetchMembers()])
-  .then(async ([list, membres]) => {
-    setProjets(list || []);
-    setMembres(membres || []);
-    const sMap = {}, tMap = {};
-    await Promise.all((list || []).map(async (p) => {
-      try {
-        const [sr, tr] = await Promise.all([fetchStats(p.id), fetchTasks(p.id)]);
-        sMap[p.id] = sr;
-        tMap[p.id] = tr || [];
-      } catch { sMap[p.id] = null; tMap[p.id] = []; }
-    }));
-    setStatsMap(sMap); setTachesMap(tMap); setLoading(false);
-  }).catch(() => setLoading(false));
+    Promise.all([fetchProjects(), fetchMembers()])
+      .then(async ([list, membres]) => {
+        setProjets(list || []);
+        setMembres(membres || []);
+        const sMap = {}, tMap = {};
+        await Promise.all((list || []).map(async (p) => {
+          try {
+            const [sr, tr] = await Promise.all([fetchStats(p.id), fetchTasks(p.id)]);
+            sMap[p.id] = sr; tMap[p.id] = tr || [];
+          } catch { sMap[p.id] = null; tMap[p.id] = []; }
+        }));
+        setStatsMap(sMap); setTachesMap(tMap); setLoading(false);
+      }).catch(() => setLoading(false));
   }, []);
 
   const handleLogout = () => {
-  localStorage.removeItem("jwt");
-  localStorage.removeItem("user");
-  navigate("/");
-};    
-
+    localStorage.removeItem("jwt");
+    localStorage.removeItem("user");
+    navigate("/");
+  };
 
   const allTaches = useMemo(() => Object.values(tachesMap).flat(), [tachesMap]);
   const now = useMemo(() => new Date(), []);
 
-  
-  const isOverdue = t => t.dueDate && new Date(t.dueDate) < now && !isDone(t);
+  const isOverdue  = t => t.dueDate && new Date(t.dueDate) < now && !isDone(t);
   const isUpcoming = t => {
     if (!t.dueDate || isDone(t)) return false;
     const diff = (new Date(t.dueDate) - now) / 86400000;
     return diff >= 0 && diff <= 7;
   };
 
-  const totalTaches = allTaches.length;
-  const totalDone = allTaches.filter(isDone).length;
+  const totalTaches     = allTaches.length;
+  const totalDone       = allTaches.filter(isDone).length;
   const totalInProgress = allTaches.filter(isInProgress).length;
-  const totalTodo = allTaches.filter(isTodo).length;
-  const totalLate = allTaches.filter(isOverdue).length;
-  const totalProgress = totalTaches > 0 ? Math.round((totalDone / totalTaches) * 100) : 0;
-  const upcomingTasks = allTaches.filter(isUpcoming).sort((a,b) => new Date(a.dueDate)-new Date(b.dueDate));
-  const overdueTasks = allTaches.filter(isOverdue).sort((a,b) => new Date(a.dueDate)-new Date(b.dueDate));
-  const recentTasks = [...allTaches].sort((a,b) => new Date(b.updatedAt||b.createdAt||0)-new Date(a.updatedAt||a.createdAt||0)).slice(0,5);
+  const totalTodo       = allTaches.filter(isTodo).length;
+  const totalLate       = allTaches.filter(isOverdue).length;
+  const totalProgress   = totalTaches > 0 ? Math.round((totalDone / totalTaches) * 100) : 0;
+  const upcomingTasks   = allTaches.filter(isUpcoming).sort((a,b) => new Date(a.dueDate)-new Date(b.dueDate));
+  const overdueTasks    = allTaches.filter(isOverdue).sort((a,b) => new Date(a.dueDate)-new Date(b.dueDate));
+  const recentTasks     = [...allTaches].sort((a,b) => new Date(b.updatedAt||b.createdAt||0)-new Date(a.updatedAt||a.createdAt||0)).slice(0,5);
 
   const productivityScore = useMemo(() => {
     if (totalTaches === 0) return 75;
-    const completionScore = Math.round((totalDone / totalTaches) * 50);
+    const completionScore  = Math.round((totalDone / totalTaches) * 50);
     const punctualityScore = Math.round(((totalTaches - totalLate) / totalTaches) * 30);
-    const activityScore = Math.min(20, projets.length * 5 + (totalInProgress > 0 ? 10 : 0));
+    const activityScore    = Math.min(20, projets.length * 5 + (totalInProgress > 0 ? 10 : 0));
     return Math.min(100, completionScore + punctualityScore + activityScore);
   }, [totalTaches, totalDone, totalLate, totalInProgress, projets.length]);
 
   const scoreLabel = productivityScore >= 80 ? "Excellent" : productivityScore >= 60 ? "Bien" : productivityScore >= 40 ? "Moyen" : "À améliorer";
   const scoreColor = productivityScore >= 80 ? "#9FB878" : productivityScore >= 60 ? "#9FB878" : productivityScore >= 40 ? "#c27a2a" : "#b23a3a";
-  const scoreBg = productivityScore >= 80 ? "#f0f2e0" : productivityScore >= 60 ? "#fef9e7" : productivityScore >= 40 ? "#fff3e0" : "#fdecea";
+  const scoreBg    = productivityScore >= 80 ? "#f0f2e0" : productivityScore >= 60 ? "#fef9e7" : productivityScore >= 40 ? "#fff3e0" : "#fdecea";
 
   const statusDist = useMemo(() => allTaches.reduce((acc,t) => {
     const s = t._links?.status?.title || "Inconnu";
@@ -94,16 +370,16 @@ export default function Dashboard() {
   }, {}), [statsMap]);
 
   const weekEntries = Object.entries(weeklyVelocity).sort((a,b)=>a[0].localeCompare(b[0])).slice(-7);
-  const maxWeekVal = Math.max(...weekEntries.map(e=>e[1]),1);
+  const maxWeekVal  = Math.max(...weekEntries.map(e=>e[1]),1);
 
   const filteredKanban = useMemo(() => {
-    if (kanbanFilter==="todo") return allTaches.filter(isTodo);
+    if (kanbanFilter==="todo")     return allTaches.filter(isTodo);
     if (kanbanFilter==="progress") return allTaches.filter(isInProgress);
-    if (kanbanFilter==="done") return allTaches.filter(isDone);
+    if (kanbanFilter==="done")     return allTaches.filter(isDone);
     return allTaches;
   }, [allTaches, kanbanFilter]);
 
-  // PALETTE - vert remplacé par #9FB878
+  // PALETTE
   const C = {
     green: "#9FB878", greenLight: "#f5f6ec", greenMid: "#dfe0c0", greenDark: "#5a6332",
     pink: "#d4538a", pinkLight: "#fce7f3", pinkMid: "#f4b8d4", pinkDark: "#7d1f52",
@@ -117,8 +393,8 @@ export default function Dashboard() {
   };
 
   const accentColors = [C.green, C.pink, C.orange, C.blue, "#9b8dc2"];
-  const accentBg = [C.greenLight, C.pinkLight, C.orangeLight, C.blueLight, "#f3f0fa"];
-  const accentDark = [C.greenDark, C.pinkDark, "#7a4520", "#2a4f82", "#4a3a7a"];
+  const accentBg     = [C.greenLight, C.pinkLight, C.orangeLight, C.blueLight, "#f3f0fa"];
+  const accentDark   = [C.greenDark, C.pinkDark, "#7a4520", "#2a4f82", "#4a3a7a"];
 
   const card = (extra={}) => ({
     background: C.card, borderRadius: "18px", padding: "20px",
@@ -179,19 +455,22 @@ export default function Dashboard() {
   return (
     <div style={{display:"grid",gridTemplateColumns:"220px 1fr",minHeight:"100vh",background:C.bg,fontFamily:"'Segoe UI',Arial,sans-serif"}}>
 
-      {/* SIDEBAR */}
+      {/* ── SIDEBAR ── */}
       <aside style={{background:"#fff",borderRight:`1px solid ${C.border}`,padding:"24px 0",display:"flex",flexDirection:"column",justifyContent:"space-between",position:"sticky",top:0,height:"100vh",overflowY:"auto",boxShadow:"2px 0 8px rgba(0,0,0,0.03)"}}>
         <div>
+          {/* Logo */}
           <div style={{display:"flex",alignItems:"center",gap:"10px",padding:"0 20px 28px"}}>
             <div style={{width:"32px",height:"32px",borderRadius:"10px",background:C.green,display:"flex",alignItems:"center",justifyContent:"center",fontSize:"16px",boxShadow:`0 2px 8px ${C.greenMid}`}}>🐝</div>
             <span style={{fontSize:"16px",fontWeight:"700",color:C.text}}>lightproject</span>
           </div>
+
+          {/* Nav principale */}
           <div style={{padding:"0 12px"}}>
             {[
-              {label:"Dashboard",path:"/dashboard",active:true},
-              {label:"Mes projets",path:"/projets"},
-              {label:"Mes tâches",path:"/taches"},
-              {label:"Analyse IA",path:"/ai"},
+              {label:"Dashboard",   path:"/dashboard", active:true},
+              {label:"Mes projets", path:"/projets"},
+              {label:"Mes tâches",  path:"/taches"},
+               {label:"Gantt",       path:"/gantt"},  
             ].map(item => (
               <div key={item.path} onClick={()=>navigate(item.path)}
                 style={{padding:"10px 14px",borderRadius:"12px",fontSize:"13px",cursor:"pointer",marginBottom:"3px",
@@ -204,13 +483,47 @@ export default function Dashboard() {
               </div>
             ))}
           </div>
+
           <div style={{height:"1px",background:C.border,margin:"16px"}}/>
+
+          {/* Compte */}
           <div style={{padding:"0 12px"}}>
             <p style={{fontSize:"10px",color:C.textLight,textTransform:"uppercase",letterSpacing:"1px",padding:"0 14px",margin:"0 0 6px"}}>Compte</p>
-            <div style={{padding:"10px 14px",borderRadius:"12px",fontSize:"13px",color:C.textMuted,cursor:"pointer",marginBottom:"2px"}} onClick={()=>navigate("/profil")}>Mon profil</div>
-            <div style={{padding:"10px 14px",borderRadius:"12px",fontSize:"13px",color:C.pink,cursor:"pointer",fontWeight:"500"}} onClick={handleLogout}>Déconnexion</div>
+            <div style={{padding:"10px 14px",borderRadius:"12px",fontSize:"13px",color:C.textMuted,cursor:"pointer",marginBottom:"2px"}}
+              onClick={()=>navigate("/profil")}>Mon profil</div>
+
+            <div
+
+  style={{
+
+    padding: "10px 14px", borderRadius: "12px", fontSize: "13px",
+
+    color: C.textMuted, cursor: "pointer", marginBottom: "2px",
+
+    display: "flex", alignItems: "center", gap: "6px",
+
+    transition: "background 0.15s",
+
+  }}
+
+  onClick={() => navigate("/notifications")}
+
+  onMouseEnter={e => e.currentTarget.style.background = C.greenLight}
+
+  onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+
+>
+
+  <span>⚙️</span> Paramètres notifications    {/* ← texte corrigé */}
+
+</div>
+
+            <div style={{padding:"10px 14px",borderRadius:"12px",fontSize:"13px",color:C.pink,cursor:"pointer",fontWeight:"500"}}
+              onClick={handleLogout}>Déconnexion</div>
           </div>
         </div>
+
+        {/* User card */}
         <div style={{margin:"0 16px"}}>
           <div style={{background:C.greenLight,borderRadius:"14px",padding:"12px",display:"flex",alignItems:"center",gap:"10px",border:`1px solid ${C.greenMid}`}}>
             <div style={{width:"36px",height:"36px",borderRadius:"50%",background:C.green,display:"flex",alignItems:"center",justifyContent:"center",fontSize:"15px",fontWeight:"700",color:"#fff",flexShrink:0,boxShadow:`0 2px 6px ${C.greenMid}`}}>
@@ -224,7 +537,7 @@ export default function Dashboard() {
         </div>
       </aside>
 
-      {/* MAIN */}
+      {/* ── MAIN ── */}
       <main style={{padding:"28px",overflowY:"auto"}}>
 
         {/* HEADER */}
@@ -245,6 +558,10 @@ export default function Dashboard() {
               <button style={{background:C.pink,color:"#fff",border:"none",padding:"8px 18px",borderRadius:"999px",fontSize:"13px",fontWeight:"600",cursor:"pointer",boxShadow:`0 3px 10px ${C.pinkMid}`}}
                 onClick={()=>navigate("/projets/nouveau")}>+ Nouveau projet</button>
             )}
+
+            {/* ── NOUVEAU : Cloche de notification ── */}
+            <NotificationBell C={C} />
+
             <div style={{width:"36px",height:"36px",borderRadius:"50%",background:C.green,display:"flex",alignItems:"center",justifyContent:"center",fontSize:"14px",fontWeight:"700",color:"#fff",boxShadow:`0 2px 6px ${C.greenMid}`}}>
               {user.name?.charAt(0)?.toUpperCase()||"A"}
             </div>
@@ -254,11 +571,11 @@ export default function Dashboard() {
         {/* KPI */}
         <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:"12px",marginBottom:"24px"}}>
           {[
-            {label:"Projets actifs",val:projets.length,bg:C.green,tc:"#fff",sub:"total"},
-            {label:"Tâches totales",val:totalTaches,bg:"#fff",tc:C.text,sub:"tous projets"},
-            {label:"Terminées",val:totalDone,bg:C.pinkLight,tc:C.pinkDark,sub:"complétées"},
-            {label:"En cours",val:totalInProgress,bg:C.blueLight,tc:C.blue,sub:"in progress"},
-            {label:"En retard",val:totalLate,bg:totalLate>0?"#fdecea":"#fff",tc:totalLate>0?"#b23a3a":C.textMuted,sub:"à traiter"},
+            {label:"Projets actifs",  val:projets.length,    bg:C.green,       tc:"#fff",          sub:"total"},
+            {label:"Tâches totales",  val:totalTaches,       bg:"#fff",        tc:C.text,          sub:"tous projets"},
+            {label:"Terminées",       val:totalDone,         bg:C.pinkLight,   tc:C.pinkDark,      sub:"complétées"},
+            {label:"En cours",        val:totalInProgress,   bg:C.blueLight,   tc:C.blue,          sub:"in progress"},
+            {label:"En retard",       val:totalLate,         bg:totalLate>0?"#fdecea":"#fff", tc:totalLate>0?"#b23a3a":C.textMuted, sub:"à traiter"},
           ].map((k,i)=>(
             <div key={i} style={{...card({padding:"18px"}),background:k.bg}}>
               <p style={{fontSize:"10px",color:k.tc,opacity:0.75,textTransform:"uppercase",letterSpacing:"0.6px",margin:"0 0 8px"}}>{k.label}</p>
@@ -268,10 +585,10 @@ export default function Dashboard() {
           ))}
         </div>
 
-        {/* GRID */}
+        {/* GRID 3 colonnes */}
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"16px"}}>
 
-          {/* COL 1 */}
+          {/* ── COL 1 ── */}
           <div style={{display:"flex",flexDirection:"column",gap:"14px"}}>
 
             {/* PRODUCTIVITY SCORE */}
@@ -297,9 +614,9 @@ export default function Dashboard() {
                 </div>
                 <div style={{flex:1,display:"flex",flexDirection:"column",gap:"8px"}}>
                   {[
-                    {label:"Complétion",val:totalTaches>0?Math.round((totalDone/totalTaches)*100):0,col:C.green},
-                    {label:"Ponctualité",val:totalTaches>0?Math.round(((totalTaches-totalLate)/totalTaches)*100):100,col:C.blue},
-                    {label:"Activité",val:Math.min(100,projets.length*20+(totalInProgress>0?40:0)),col:C.pink},
+                    {label:"Complétion",  val:totalTaches>0?Math.round((totalDone/totalTaches)*100):0, col:C.green},
+                    {label:"Ponctualité", val:totalTaches>0?Math.round(((totalTaches-totalLate)/totalTaches)*100):100, col:C.blue},
+                    {label:"Activité",    val:Math.min(100,projets.length*20+(totalInProgress>0?40:0)), col:C.pink},
                   ].map((item,i)=>(
                     <div key={i}>
                       <div style={{display:"flex",justifyContent:"space-between",marginBottom:"2px"}}>
@@ -336,7 +653,7 @@ export default function Dashboard() {
                       onClick={()=>navigate(`/projets/${p.id}`)}>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"7px"}}>
                         <div style={{display:"flex",alignItems:"center",gap:"8px"}}>
-                          <div style={{width:"9px",height:"9px",borderRadius:"50%",background:col,boxShadow:`0 0 0 3px ${bg}`}}/>
+                          <div style={{width:"9px",height:"9px",borderRadius:"50%",background:col}}/>
                           <span style={{fontSize:"13px",fontWeight:"600",color:C.text}}>{p.name}</span>
                           {(kpis?.late||0)>0 && <span style={{fontSize:"10px",background:"#fdecea",color:"#b23a3a",padding:"1px 7px",borderRadius:"999px",fontWeight:"600",border:"1px solid #f5c6c6"}}>{kpis.late} retard</span>}
                         </div>
@@ -373,9 +690,9 @@ export default function Dashboard() {
               {kanbanFilter==="all" ? (
                 <div style={{display:"flex",gap:"8px"}}>
                   {[
-                    {label:"À faire",items:allTaches.filter(isTodo),col:C.pink,bg:C.pinkLight,border:C.pinkMid},
-                    {label:"En cours",items:allTaches.filter(isInProgress),col:C.blue,bg:C.blueLight,border:"#c5daf5"},
-                    {label:"Terminé",items:allTaches.filter(isDone),col:C.greenDark,bg:C.greenLight,border:C.greenMid},
+                    {label:"À faire",  items:allTaches.filter(isTodo),       col:C.pink,     bg:C.pinkLight,  border:C.pinkMid},
+                    {label:"En cours", items:allTaches.filter(isInProgress), col:C.blue,     bg:C.blueLight,  border:"#c5daf5"},
+                    {label:"Terminé",  items:allTaches.filter(isDone),       col:C.greenDark,bg:C.greenLight, border:C.greenMid},
                   ].map(col=>(
                     <div key={col.label} style={{flex:1}}>
                       <div style={{background:col.bg,borderRadius:"10px",padding:"6px 10px",marginBottom:"7px",display:"flex",justifyContent:"space-between",alignItems:"center",border:`1px solid ${col.border}`}}>
@@ -413,7 +730,7 @@ export default function Dashboard() {
             </div>
           </div>
 
-          {/* COL 2 */}
+          {/* ── COL 2 ── */}
           <div style={{display:"flex",flexDirection:"column",gap:"14px"}}>
 
             {/* TODAY'S FOCUS */}
@@ -530,7 +847,7 @@ export default function Dashboard() {
             )}
           </div>
 
-          {/* COL 3 */}
+          {/* ── COL 3 ── */}
           <div style={{display:"flex",flexDirection:"column",gap:"14px"}}>
 
             {/* PROGRESSION GLOBALE */}

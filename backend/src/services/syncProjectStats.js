@@ -1,15 +1,5 @@
 "use strict";
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  Service — syncProjectStats.js  (v5)
-//
-//  CORRECTION vs v4 :
-//    3. aiSummary persisté avec stats.explanation (la valeur fraîche)
-//       Avant : meta.ai_summary || null → on réécrivait l'ancienne valeur
-//       en DB, donc l'explication affichée dans le frontend était toujours
-//       obsolète ("aucun signal d'alerte" même avec score > 30).
-// ══════════════════════════════════════════════════════════════════════════════
-
 const { getTasks }            = require("./openproject");
 const { computeProjectStats } = require("./riskAndProgress");
 const {
@@ -17,6 +7,7 @@ const {
   getAllProjectsMeta,
   getProjectMeta,
   upsertProjectMeta,
+  setAssigneeOpId,
 } = require("../database/db");
 
 function getTaskExtensionsForTaskIds(taskIds) {
@@ -27,6 +18,36 @@ function getTaskExtensionsForTaskIds(taskIds) {
       `SELECT op_task_id, is_blocked FROM task_extensions WHERE op_task_id IN (${placeholders})`
     )
     .all(...taskIds);
+}
+
+// ── NOUVEAU : met à jour assignee_op_id dans task_extensions ─────────────────
+//  Sans ça, les membres ne peuvent jamais fixer leur taux horaire (403).
+//  On insère la ligne si elle n'existe pas, puis on met à jour l'assignee.
+// ─────────────────────────────────────────────────────────────────────────────
+function syncTaskExtensions(tasks, projectId) {
+  const upsertExt = db.prepare(`
+    INSERT INTO task_extensions (op_task_id, op_project_id, is_blocked)
+    VALUES (?, ?, 0)
+    ON CONFLICT(op_task_id) DO UPDATE SET
+      op_project_id = COALESCE(excluded.op_project_id, op_project_id)
+  `);
+
+  const runAll = db.transaction(() => {
+    for (const task of tasks) {
+      upsertExt.run(Number(task.id), Number(projectId));
+
+      const assigneeHref = task._links?.assignee?.href;
+      const assigneeId   = assigneeHref
+        ? Number(assigneeHref.split("/").pop())
+        : null;
+
+      if (assigneeId && !isNaN(assigneeId)) {
+        setAssigneeOpId(Number(task.id), assigneeId);
+      }
+    }
+  });
+
+  runAll();
 }
 
 async function syncOneProject(projectId, opToken) {
@@ -42,6 +63,18 @@ async function syncOneProject(projectId, opToken) {
   const taskExtensions = getTaskExtensionsForTaskIds(taskIds);
   const meta           = getProjectMeta(projectId) || {};
 
+  // ── FIX assignee_op_id — doit tourner AVANT computeProjectStats ──────────
+  //  computeProjectStats n'a pas besoin de l'assignee, mais le fix doit
+  //  être fait le plus tôt possible pour que le prochain appel budget/rate
+  //  trouve les bonnes données.
+  // ─────────────────────────────────────────────────────────────────────────
+  try {
+    syncTaskExtensions(tasks, projectId);
+  } catch (err) {
+    // Non bloquant — on continue même si ça échoue
+    console.warn(`[syncStats] syncTaskExtensions échouée pour projet ${projectId}:`, err.message);
+  }
+
   const stats = computeProjectStats(tasks, meta, taskExtensions);
 
   upsertProjectMeta(projectId, {
@@ -49,8 +82,6 @@ async function syncOneProject(projectId, opToken) {
     endDate:           meta.end_date     || null,
     workload:          meta.workload     || null,
     budgetTotal:       meta.budget_total || null,
-    // ✅ CORRECTION 3 : on persiste stats.explanation (valeur fraîche)
-    // Avant : meta.ai_summary || null → l'explication n'était jamais mise à jour
     aiSummary:         stats.explanation,
     progress:          stats.progress,
     riskScore:         stats.riskScore,

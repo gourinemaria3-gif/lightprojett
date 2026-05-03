@@ -45,12 +45,10 @@ self.addEventListener("notificationclick", (event) => {
   event.waitUntil(
     clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {
       for (const client of clientList) {
-        if (client.url.includes("localhost:3000") && "focus" in client) {
-          return client.focus();
-        }
+        if ("focus" in client) return client.focus();
       }
       if (clients.openWindow) {
-        return clients.openWindow("http://localhost:3000");
+        return clients.openWindow(self.registration.scope);
       }
     })
   );

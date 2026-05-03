@@ -1,23 +1,26 @@
 import React, { useState, useEffect } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 
-import LoginPage               from "./pages/LoginPage";
-import Dashboard               from "./pages/Dashboard";
-import ProjectsPage            from "./pages/ProjectsPage";
-import ProjectDetailPage       from "./pages/ProjectDetailPage";
-import NewProjectPage          from "./pages/NewProjectPage";
-import NewSubProjectPage       from "./pages/NewSubProjectPage";
-import MyTasksPage             from "./pages/MyTasksPage";
-import { ManagerBudgetPanel, MemberBudgetPanel } from "./pages/BudgetPanel";
+import LoginPage                from "./pages/LoginPage";
+import Dashboard                from "./pages/Dashboard";
+import ProjectsPage             from "./pages/ProjectsPage";
+import ProjectDetailPage        from "./pages/ProjectDetailPage";
+import NewProjectPage           from "./pages/NewProjectPage";
+import NewSubProjectPage        from "./pages/NewSubProjectPage";
+import MyTasksPage              from "./pages/MyTasksPage";
 import NotificationSettingsPage from "./pages/NotificationSettingsPage";
 
 import { requestPushPermission, onForegroundMessage } from "./services/firebase";
+import { register }             from "./services/serviceWorkerRegistration";
+import { initSyncManager }      from "./services/syncManager";
+
+import OfflineBanner from "./components/OfflineBanner.js";
+import GanttPage from "./pages/GanttPage";
 
 export default function App() {
   const [user,     setUser]     = useState(null);
   const [checking, setChecking] = useState(true);
 
-  // ── Restauration de session au démarrage ────────────────────────────────
   useEffect(() => {
     const jwt    = localStorage.getItem("jwt");
     const stored = localStorage.getItem("user");
@@ -32,17 +35,23 @@ export default function App() {
     setChecking(false);
   }, []);
 
-  // ── Firebase FCM ─────────────────────────────────────────────────────────
+  useEffect(() => {
+    register({
+      onUpdate:  () => console.log("[SW] Nouvelle version disponible"),
+      onSuccess: () => console.log("[SW] App disponible hors ligne"),
+    });
+    initSyncManager();
+  }, []);
+
   useEffect(() => {
     if (!user) return;
-
+    if (window.location.protocol !== "https:") return;
     requestPushPermission().catch(() => {});
 
     let unsubscribe = null;
     onForegroundMessage((payload) => {
       const title = payload.notification?.title || "LightProject";
       const body  = payload.notification?.body  || "";
-      console.log("[FCM] Notif premier plan:", title, body);
       if (Notification.permission === "granted") {
         new Notification(title, { body, icon: "/logo192.png" });
       }
@@ -55,10 +64,7 @@ export default function App() {
     };
   }, [user]);
 
-  function handleLogin(userData) {
-    setUser(userData);
-  }
-
+  function handleLogin(userData) { setUser(userData); }
   function handleLogout() {
     localStorage.removeItem("jwt");
     localStorage.removeItem("user");
@@ -66,37 +72,22 @@ export default function App() {
   }
 
   if (checking) return null;
+  if (!user) return <LoginPage onLogin={handleLogin} />;
 
-  // ── Si pas connecté → Login ──────────────────────────────────────────────
-  if (!user) {
-    return <LoginPage onLogin={handleLogin} />;
-  }
-
-  // ── Connecté → Router avec toutes les pages ──────────────────────────────
   return (
-    <Routes>
-
-      {/* Dashboard */}
-      <Route path="/dashboard" element={<Dashboard user={user} onLogout={handleLogout} />} />
-
-      {/* Projets */}
-      <Route path="/projets"                          element={<ProjectsPage />} />
-      <Route path="/projets/nouveau"                  element={<NewProjectPage />} />
-      <Route path="/projets/:id"                      element={<ProjectDetailPage />} />
-      <Route path="/projets/:id/sous-projet/nouveau"  element={<NewSubProjectPage />} />
-
-      {/* Tâches */}
-      <Route path="/taches" element={<MyTasksPage />} />
-
-      {/* Budget */}
-      <Route path="/budget" element={user?.isAdmin ? <ManagerBudgetPanel /> : <MemberBudgetPanel />} />
-
-      {/* Notifications */}
-      <Route path="/notifications" element={<NotificationSettingsPage />} />
-
-      {/* Par défaut → dashboard */}
-      <Route path="*" element={<Navigate to="/dashboard" replace />} />
-
-    </Routes>
+    <>
+      <Routes>
+        <Route path="/dashboard"                        element={<Dashboard user={user} onLogout={handleLogout} />} />
+        <Route path="/projets"                          element={<ProjectsPage />} />
+        <Route path="/projets/nouveau"                  element={<NewProjectPage />} />
+        <Route path="/projets/:id"                      element={<ProjectDetailPage />} />
+        <Route path="/projets/:id/sous-projet/nouveau"  element={<NewSubProjectPage />} />
+        <Route path="/taches"                           element={<MyTasksPage />} />
+        <Route path="/notifications"                    element={<NotificationSettingsPage />} />
+        <Route path="/gantt" element={<GanttPage />} />
+        <Route path="*"                                 element={<Navigate to="/dashboard" replace />} />
+      </Routes>
+      <OfflineBanner />
+    </>
   );
 }

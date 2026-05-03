@@ -3,11 +3,20 @@
 // ══════════════════════════════════════════════════════════════════════════════
 //  Route — /api/dependencies
 //
-//  CORRECTIONS :
-//    1. POST → notif "blocked" envoyée au membre assigné quand dépendance créée
-//    2. DELETE → notif "unblocked" envoyée si la tâche n'est plus bloquée
-//    3. PATCH statut tâche → propagateBlockingFrom envoie "unblocked" si tâche
-//       bloquante devient terminée
+//  CORRECTIONS vs version précédente :
+//
+//  1. buildTaskMap mis en cache dans dependencies.js (TTL 8s)
+//     GET /:taskId ne déclenche plus une requête HTTP OpenProject systématique.
+//     Plusieurs endpoints appelés en parallèle pour le même projet partagent
+//     la même réponse mise en cache.
+//
+//  2. invalidateTaskMapCache après POST et DELETE
+//     Quand une dépendance est ajoutée ou supprimée, le cache du projet est
+//     invalidé immédiatement. Ainsi, le prochain GET reçoit des données
+//     fraîches et non le snapshot d'avant la mutation.
+//
+//  3. isDone importé depuis dependencies.js (qui le ré-exporte depuis
+//     utils/taskStatus.js) — pas de duplication locale.
 // ══════════════════════════════════════════════════════════════════════════════
 
 const express = require("express");
@@ -25,7 +34,8 @@ const {
   addDependencyWithRecalc,
   removeDependencyWithRecalc,
   buildTaskMap,
-  isDone,
+  invalidateTaskMapCache, // ← NOUVEAU : invalide le cache après mutation
+  isDone,                  // ← ré-exporté depuis utils/taskStatus via dependencies.js
 } = require("../services/dependencies");
 
 const { syncOneProject }   = require("../services/syncProjectStats");
@@ -41,6 +51,11 @@ function getAccess(userId, projectId, isAdmin) {
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  GET /api/dependencies/:taskId?projectId=X
+//
+//  CORRECTION : buildTaskMap utilise maintenant le cache partagé.
+//  Si POST /dependencies a été appelé juste avant pour le même projet,
+//  le cache a été invalidé → cet appel reçoit des données fraîches.
+//  Si aucune mutation récente, le cache évite un appel HTTP OP redondant.
 // ══════════════════════════════════════════════════════════════════════════════
 router.get("/:taskId", async (req, res) => {
   const { taskId }    = req.params;
@@ -58,6 +73,7 @@ router.get("/:taskId", async (req, res) => {
   }
 
   try {
+    // buildTaskMap utilise le cache — pas d'appel HTTP si TTL encore valide
     const taskMap = await buildTaskMap(projectId, req.opToken);
 
     if (!taskMap[taskId]) {
@@ -105,7 +121,9 @@ router.get("/:taskId", async (req, res) => {
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  POST /api/dependencies
-//  → Notif "blocked" envoyée immédiatement si la tâche est maintenant bloquée
+//
+//  CORRECTION : invalidateTaskMapCache(projectId) est appelé après la mutation
+//  pour que le prochain GET reçoive un taskMap à jour depuis OP.
 // ══════════════════════════════════════════════════════════════════════════════
 router.post("/", async (req, res) => {
   const { taskId, dependsOnTaskId, projectId } = req.body;
@@ -149,7 +167,13 @@ router.post("/", async (req, res) => {
 
     const isNowBlocked = addDependencyWithRecalc(taskId, dependsOnTaskId, taskMap);
 
-    // ── Notif "blocked" si la tâche est maintenant bloquée ───────────────────
+    // ── Invalide le cache APRÈS la mutation ────────────────────────────────
+    //  Le graphe de dépendances vient de changer. Le prochain appel
+    //  buildTaskMap rechargera les tâches depuis OP plutôt que de servir
+    //  le snapshot d'avant l'ajout de la dépendance.
+    invalidateTaskMapCache(projectId);
+
+    // ── Notif "blocked" si la tâche est maintenant bloquée ────────────────
     if (isNowBlocked) {
       const blockedTask  = taskMap[taskId];
       const blockingTask = taskMap[dependsOnTaskId];
@@ -166,7 +190,7 @@ router.post("/", async (req, res) => {
         blockedByTitle:  blockingTask?.subject || `#${dependsOnTaskId}`,
         assigneeId,
         projectId,
-      }).catch(err => console.error("[DEP] Erreur notifyTaskBlocked:", err.message));
+      }).catch((err) => console.error("[DEP] Erreur notifyTaskBlocked:", err.message));
     }
 
     // Sync stats
@@ -190,7 +214,8 @@ router.post("/", async (req, res) => {
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  DELETE /api/dependencies
-//  → Notif "unblocked" envoyée si la tâche n'est plus bloquée après suppression
+//
+//  CORRECTION : invalidateTaskMapCache(projectId) est appelé après la mutation.
 // ══════════════════════════════════════════════════════════════════════════════
 router.delete("/", async (req, res) => {
   const { taskId, dependsOnTaskId, projectId } = req.body;
@@ -218,7 +243,10 @@ router.delete("/", async (req, res) => {
 
     const isNowBlocked = removeDependencyWithRecalc(taskId, dependsOnTaskId, taskMap);
 
-    // ── Notif "unblocked" si la tâche était bloquée et ne l'est plus ─────────
+    // ── Invalide le cache APRÈS la mutation ────────────────────────────────
+    invalidateTaskMapCache(projectId);
+
+    // ── Notif "unblocked" si la tâche était bloquée et ne l'est plus ──────
     if (wasBlocked && !isNowBlocked) {
       const task       = taskMap[taskId];
       const assigneeId = task?._links?.assignee?.href
@@ -232,7 +260,7 @@ router.delete("/", async (req, res) => {
         taskTitle:  task?.subject || `#${taskId}`,
         assigneeId,
         projectId,
-      }).catch(err => console.error("[DEP] Erreur notifyTaskUnblocked:", err.message));
+      }).catch((err) => console.error("[DEP] Erreur notifyTaskUnblocked:", err.message));
     }
 
     // Sync stats

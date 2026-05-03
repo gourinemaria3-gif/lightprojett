@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LightProject — Hors ligne</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', Arial, sans-serif;
+      background: #f6f6f2;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .card {
+      background: #fff;
+      border-radius: 20px;
+      padding: 48px 40px;
+      text-align: center;
+      max-width: 420px;
+      width: 100%;
+      border: 1px solid #e8e8e0;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.07);
+    }
+    .icon { font-size: 56px; margin-bottom: 20px; }
+    h1 { font-size: 22px; color: #2d2d2a; margin-bottom: 10px; font-weight: 800; }
+    p  { font-size: 14px; color: #6e6e68; line-height: 1.7; margin-bottom: 28px; }
+    .btn {
+      background: #9FB878;
+      color: #fff;
+      border: none;
+      border-radius: 999px;
+      padding: 12px 28px;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .btn:hover { opacity: 0.88; }
+    .status { margin-top: 24px; font-size: 12px; color: #aaa; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">📡</div>
+    <h1>Vous êtes hors ligne</h1>
+    <p>
+      LightProject fonctionne en mode hors ligne.<br>
+      Vos modifications seront synchronisées dès la reconnexion.
+    </p>
+    <button class="btn" onclick="window.location.href='/'">
+      Retour à l'application
+    </button>
+    <div class="status" id="status">Vérification de la connexion…</div>
+  </div>
+  <script>
+    function checkConnection() {
+      if (navigator.onLine) {
+        document.getElementById('status').textContent = 'Connexion rétablie — redirection…';
+        setTimeout(function() { window.location.href = '/'; }, 1000);
+      } else {
+        document.getElementById('status').textContent = 'Toujours hors ligne';
+      }
+    }
+    window.addEventListener('online',  checkConnection);
+    window.addEventListener('offline', checkConnection);
+    checkConnection();
+  </script>
+</body>
+</html>

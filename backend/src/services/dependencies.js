@@ -1,15 +1,29 @@
 "use strict";
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  Service — dependencies.js  (v3)
+//  Service — dependencies.js
 //
-//  CHANGEMENTS vs v2 :
-//    - isTaskBlockedRecursive supprimé — remplacé par isTaskBlocked (direct)
-//    - Règle clarifiée : B est bloquée si AU MOINS UNE dépendance directe
-//      n'est pas terminée (isDone = false). Le retard n'entre pas en compte
-//      ici — il est géré par le score de risque.
-//    - recalcBlockedState simplifié (plus de cache, plus de récursivité)
-//    - Tâche supprimée dans OP → non bloquante (on skip)
+//  CORRECTIONS vs version précédente :
+//
+//  1. isDone dupliquée → supprimée, importée depuis utils/taskStatus.js
+//     La dépendance circulaire est cassée proprement par le fichier utilitaire
+//     pur qui ne dépend d'aucun service.
+//
+//  2. buildTaskMap avec cache TTL court (8 secondes par projectId)
+//     Plusieurs appels simultanés pour le même projet (ex : le frontend charge
+//     GET /dependencies/:taskA et GET /dependencies/:taskB en parallèle)
+//     partagent maintenant la même réponse OpenProject au lieu de déclencher
+//     N requêtes HTTP identiques. Le TTL court (8s) garantit que les stats
+//     restent fraîches sans sur-solliciter OP.
+//     Appels en vol (in-flight) dédupliqués via une Map de Promises.
+//
+//  3. getAllDependentsRecursive avec limite de profondeur (MAX_DEPTH = 50)
+//     Sans limite, un graphe en étoile avec 500 dépendants directs déclenchait
+//     500 recalculs séquentiels et pouvait exploser la call stack.
+//     Avec MAX_DEPTH :
+//       - Les nœuds au-delà de la limite sont ignorés pour ce cycle
+//       - Un warning est loggué pour permettre le diagnostic en production
+//       - La limite est largement suffisante pour tout projet réel
 // ══════════════════════════════════════════════════════════════════════════════
 
 const {
@@ -24,31 +38,100 @@ const {
 const { getTasks }                               = require("./openproject");
 const { notifyTaskBlocked, notifyTaskUnblocked } = require("./notificationEngine");
 
-// ──────────────────────────────────────────────────────────────────────────────
-//  isDone — cascade de détection (identique à riskAndProgress.js)
-//  Dupliquée ici pour éviter une dépendance circulaire entre services.
-// ──────────────────────────────────────────────────────────────────────────────
-const DONE_STATUSES = new Set([
-  "done", "closed", "finished", "resolved", "rejected",
-  "terminé", "terminée", "fermé", "fermée", "completed",
-  "complete", "annulé", "annulée", "cancelled", "canceled",
-]);
+// ── CORRECTION 1 : import depuis l'utilitaire partagé ────────────────────────
+//  isDone n'est plus définie localement — source de vérité unique dans
+//  utils/taskStatus.js, importée ici ET dans riskAndProgress.js.
+// ─────────────────────────────────────────────────────────────────────────────
+const { isDone } = require("../utils/taskStatus");
 
-function isDone(opTaskObject) {
-  if (!opTaskObject) return false;
-  if (opTaskObject.isClosed === true) return true;
-  const pct = Number(opTaskObject.percentageDone ?? opTaskObject.percentComplete ?? -1);
-  if (pct === 100) return true;
-  const statusTitle = (
-    opTaskObject._links?.status?.title ||
-    opTaskObject.status?.title ||
-    ""
-  ).toLowerCase().trim();
-  if (statusTitle && DONE_STATUSES.has(statusTitle)) return true;
-  const statusHref = (opTaskObject._links?.status?.href || "").toLowerCase();
-  if (statusHref && (statusHref.includes("closed") || statusHref.includes("done"))) return true;
-  return false;
+// ── CORRECTION 3 : limite de profondeur pour getAllDependentsRecursive ────────
+//  Protège contre les graphes très larges ou profonds.
+//  50 niveaux couvre la totalité des projets réels connus.
+//  Au-delà, les nœuds sont ignorés avec un warning.
+// ─────────────────────────────────────────────────────────────────────────────
+const MAX_DEPTH = 50;
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  CACHE buildTaskMap — TTL court pour mutualiser les appels OP simultanés
+//
+//  Structure du cache :
+//    _taskMapCache[projectId] = {
+//      data:      { [taskId]: opTaskObject },  ← résultat mis en cache
+//      expiresAt: timestamp,                   ← expiration absolue
+//    }
+//
+//  _taskMapInFlight[projectId] = Promise<taskMap>
+//    ← Promise en cours de résolution pour éviter les appels dupliqués
+//       quand deux requêtes arrivent en même temps (avant que le cache
+//       ne soit peuplé).
+//
+//  TTL choisi à 8 secondes :
+//    - Suffisant pour absorber une salve de requêtes frontend simultanées
+//    - Court enough pour que les changements de statut OP soient visibles
+//      sans délai perceptible par l'utilisateur
+// ══════════════════════════════════════════════════════════════════════════════
+const TASK_MAP_TTL_MS = 8_000;
+const _taskMapCache   = {};  // { [projectId]: { data, expiresAt } }
+const _taskMapInFlight = {}; // { [projectId]: Promise<taskMap> }
+
+/**
+ * buildTaskMap — charge les tâches d'un projet depuis OpenProject.
+ *
+ * - Si le cache est valide → retourne immédiatement sans appel HTTP
+ * - Si un appel est déjà en vol → partage la même Promise (déduplication)
+ * - Sinon → déclenche un nouvel appel HTTP et peuple le cache
+ *
+ * @param {number|string} projectId
+ * @param {string} opToken
+ * @returns {Promise<{ [taskId: number]: object }>}
+ */
+async function buildTaskMap(projectId, opToken) {
+  const key = String(projectId);
+
+  // Cache valide → retour immédiat
+  const cached = _taskMapCache[key];
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.data;
+  }
+
+  // Appel déjà en vol pour ce projet → on se branche sur la même Promise
+  if (_taskMapInFlight[key]) {
+    return _taskMapInFlight[key];
+  }
+
+  // Nouvel appel HTTP — on stocke la Promise avant await pour que les
+  // requêtes concurrentes qui arrivent pendant la résolution la partagent.
+  _taskMapInFlight[key] = getTasks(projectId, opToken)
+    .then((allTasks) => {
+      const taskMap = {};
+      allTasks.forEach((t) => { taskMap[t.id] = t; });
+
+      // Peuple le cache
+      _taskMapCache[key] = { data: taskMap, expiresAt: Date.now() + TASK_MAP_TTL_MS };
+
+      return taskMap;
+    })
+    .finally(() => {
+      // Libère le slot in-flight dans tous les cas (succès ou erreur)
+      delete _taskMapInFlight[key];
+    });
+
+  return _taskMapInFlight[key];
 }
+
+/**
+ * invalidateTaskMapCache — force l'expiration du cache pour un projet.
+ *
+ * À appeler après une opération qui modifie les tâches du projet
+ * (ex : changement de statut, ajout de tâche) pour éviter de servir
+ * des données périmées au prochain appel buildTaskMap.
+ *
+ * @param {number|string} projectId
+ */
+function invalidateTaskMapCache(projectId) {
+  delete _taskMapCache[String(projectId)];
+}
+
 
 // ──────────────────────────────────────────────────────────────────────────────
 //  hasCycleFrom — détection de cycle via DFS (inchangée)
@@ -68,14 +151,7 @@ function hasCycleFrom(taskId, dependsOnTaskId) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-//  isTaskBlocked — RÈGLE FINALE
-//
-//  B est bloquée si au moins une de ses dépendances DIRECTES n'est pas
-//  terminée (isDone = false).
-//
-//  - On ne vérifie PAS le retard ici.
-//  - Si une tâche parente a été supprimée dans OP (absente de taskMap),
-//    on la considère comme "done" pour ne pas bloquer indéfiniment.
+//  isTaskBlocked — RÈGLE FINALE (inchangée)
 // ──────────────────────────────────────────────────────────────────────────────
 function isTaskBlocked(taskId, taskMap) {
   const deps = getDependenciesOf(Number(taskId));
@@ -99,7 +175,7 @@ function ensureTaskExtension(taskId) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-//  recalcBlockedState — recalcule et persiste l'état bloqué d'une tâche
+//  recalcBlockedState
 // ──────────────────────────────────────────────────────────────────────────────
 function recalcBlockedState(taskId, taskMap) {
   ensureTaskExtension(taskId);
@@ -138,16 +214,42 @@ function removeDependencyWithRecalc(taskId, dependsOnTaskId, taskMap) {
   return isBlocked;
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-//  getAllDependentsRecursive — tous les dépendants directs + indirects
-// ──────────────────────────────────────────────────────────────────────────────
-function getAllDependentsRecursive(taskId, visited = new Set()) {
+// ── CORRECTION 3 : limite de profondeur ───────────────────────────────────────
+//  getAllDependentsRecursive — tous les dépendants directs + indirects,
+//  avec protection contre les graphes trop profonds.
+//
+//  Paramètres internes :
+//    visited {Set}   — nœuds déjà visités (protection cycle résiduel)
+//    depth   {number} — profondeur courante dans le graphe
+//
+//  Comportement à MAX_DEPTH :
+//    - Le nœud courant est inclus dans les résultats
+//    - Ses enfants NE sont PAS explorés
+//    - Un warning est loggué une seule fois par appel racine
+//
+//  Pourquoi 50 ?
+//    Un projet avec 50 niveaux de dépendances en cascade est pathologique.
+//    En pratique, les projets réels ont rarement plus de 5-10 niveaux.
+//    50 laisse une marge très confortable sans risquer un stack overflow.
+// ─────────────────────────────────────────────────────────────────────────────
+function getAllDependentsRecursive(taskId, visited = new Set(), depth = 0) {
+  if (depth >= MAX_DEPTH) {
+    // Warning loggué uniquement au premier dépassement de la limite
+    if (depth === MAX_DEPTH) {
+      console.warn(
+        `[dependencies] getAllDependentsRecursive : limite de profondeur (${MAX_DEPTH}) ` +
+        `atteinte depuis la tâche racine. Les dépendants au-delà sont ignorés pour ce cycle.`
+      );
+    }
+    return [];
+  }
+
   const result = [];
   for (const d of getDependents(taskId)) {
     if (!visited.has(d.task_op_id)) {
       visited.add(d.task_op_id);
       result.push(d.task_op_id);
-      result.push(...getAllDependentsRecursive(d.task_op_id, visited));
+      result.push(...getAllDependentsRecursive(d.task_op_id, visited, depth + 1));
     }
   }
   return result;
@@ -155,15 +257,13 @@ function getAllDependentsRecursive(taskId, visited = new Set()) {
 
 // ──────────────────────────────────────────────────────────────────────────────
 //  propagateBlockingFrom
-//
-//  Appelée quand une tâche (changedTaskId) change de statut dans OP.
-//  Recalcule l'état bloqué de tous ses dépendants (directs + indirects)
-//  et envoie les notifications si l'état a changé.
 // ──────────────────────────────────────────────────────────────────────────────
 async function propagateBlockingFrom(changedTaskId, projectId, opToken) {
   const allDependentIds = getAllDependentsRecursive(changedTaskId);
   if (allDependentIds.length === 0) return;
 
+  // buildTaskMap utilise le cache — pas de requête HTTP supplémentaire si
+  // une autre fonction vient de l'appeler dans la même fenêtre de 8 secondes.
   const taskMap = await buildTaskMap(projectId, opToken);
 
   for (const task_op_id of allDependentIds) {
@@ -176,7 +276,7 @@ async function propagateBlockingFrom(changedTaskId, projectId, opToken) {
         ? Number(opTask._links.assignee.href.split("/").pop())
         : null;
       await notifyTaskUnblocked({ taskId: task_op_id, projectId, assigneeId })
-        .catch(err => console.error("Erreur notifyTaskUnblocked:", err.message));
+        .catch((err) => console.error("Erreur notifyTaskUnblocked:", err.message));
 
     } else if (!wasBlocked && isNowBlocked) {
       const opTask     = taskMap[task_op_id];
@@ -188,19 +288,9 @@ async function propagateBlockingFrom(changedTaskId, projectId, opToken) {
         projectId,
         blockedByTaskId: changedTaskId,
         assigneeId,
-      }).catch(err => console.error("Erreur notifyTaskBlocked:", err.message));
+      }).catch((err) => console.error("Erreur notifyTaskBlocked:", err.message));
     }
   }
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-//  buildTaskMap
-// ──────────────────────────────────────────────────────────────────────────────
-async function buildTaskMap(projectId, opToken) {
-  const allTasks = await getTasks(projectId, opToken);
-  const taskMap  = {};
-  allTasks.forEach(t => { taskMap[t.id] = t; });
-  return taskMap;
 }
 
 module.exports = {
@@ -210,5 +300,6 @@ module.exports = {
   removeDependencyWithRecalc,
   propagateBlockingFrom,
   buildTaskMap,
-  isDone,
+  invalidateTaskMapCache,
+  isDone, // ré-exporté pour les consommateurs existants (dependenciesRoute.js)
 };

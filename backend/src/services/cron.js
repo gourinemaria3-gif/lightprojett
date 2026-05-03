@@ -80,18 +80,7 @@ function alreadySentCronToday(eventType, entityId) {
     LIMIT 1
   `).get(eventType, String(entityId));
 }
-
-const DONE_STATUSES = new Set([
-  "done", "closed", "finished", "resolved", "rejected",
-  "terminé", "terminée", "fermé", "fermée",
-]);
-
-function isTaskDone(task) {
-  if (!task) return false;
-  if (typeof task.isClosed === "boolean") return task.isClosed;
-  return DONE_STATUSES.has((task._links?.status?.title || "").toLowerCase());
-}
-
+const { isDone: isTaskDone, DONE_STATUSES } = require("../utils/taskStatus");
 function isOverdue(task) {
   if (!task?.dueDate || isTaskDone(task)) return false;
   const due = new Date(task.dueDate);

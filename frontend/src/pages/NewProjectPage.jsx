@@ -415,7 +415,7 @@ export default function NewProjectPage({ onBack }) {
                           }} />
                         </div>
                         <span style={{ fontSize: "12px", fontWeight: "600", color: useAI ? C.greenDark : C.textMuted }}>
-                          ✨ Analyser avec l'IA Gemini
+                          ✨ Analyser avec l'IA
                         </span>
                         <span style={{ fontSize: "11px", color: C.textLight, marginLeft: "auto" }}>
                           Tâches auto

@@ -43,9 +43,8 @@ router.post("/login", async (req, res) => {
     const isAdmin = opUser.admin === true;
 
     upsertUser(userId, { name, email, isAdmin });
-
-    // ✅ MODIF 1 — ajout de deviceId requis par saveSession
-    saveSession(userId, { opToken: token, isAdmin, deviceId: "web" });
+   const deviceId = req.body.deviceId || req.headers["x-device-id"] || "web";
+   saveSession(userId, { opToken: token, isAdmin, deviceId });
 
     const jwtToken = jwt.sign(
       { userId, isAdmin },

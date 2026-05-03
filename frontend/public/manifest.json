@@ -1,8 +1,13 @@
 {
   "short_name": "LightProject",
   "name": "LightProject — Gestion de projets",
-  "description": "Gérez vos projets OpenProject avec l'aide de l'IA",
+  "description": "Application de gestion de projets connectée à OpenProject",
   "icons": [
+    {
+      "src": "favicon.ico",
+      "sizes": "64x64 32x32 24x24 16x16",
+      "type": "image/x-icon"
+    },
     {
       "src": "logo192.png",
       "type": "image/png",
@@ -16,12 +21,12 @@
       "purpose": "any maskable"
     }
   ],
-  "start_url": "/",
+  "start_url": "/dashboard",
   "display": "standalone",
-  "theme_color": "#16203F",
-  "background_color": "#16203F",
+  "theme_color": "#9FB878",
+  "background_color": "#f6f6f2",
   "orientation": "portrait-primary",
   "scope": "/",
-  "lang": "fr",
-  "categories": ["productivity", "business"]
+  "categories": ["productivity", "business"],
+  "lang": "fr"
 }

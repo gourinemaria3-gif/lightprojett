@@ -10,15 +10,7 @@
 //    3. syncOneProject    : aiSummary persisté avec stats.explanation
 //       (était : meta.ai_summary → l'ancienne valeur, jamais rafraîchie)
 // ══════════════════════════════════════════════════════════════════════════════
-
-// ──────────────────────────────────────────────────────────────────────────────
-//  CONSTANTES
-// ──────────────────────────────────────────────────────────────────────────────
-const DONE_STATUSES = new Set([
-  "done", "closed", "finished", "resolved", "rejected",
-  "terminé", "terminée", "fermé", "fermée", "completed",
-  "complete", "annulé", "annulée", "cancelled", "canceled",
-]);
+const { isDone: isTaskDone, DONE_STATUSES } = require("../utils/taskStatus");
 
 // ──────────────────────────────────────────────────────────────────────────────
 //  todayStr — date locale au format "YYYY-MM-DD" (pas de décalage UTC)
@@ -31,34 +23,6 @@ function todayStr() {
   return `${y}-${m}-${d}`;
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-//  isTaskDone — cascade de détection (robuste aux statuts custom OP)
-// ──────────────────────────────────────────────────────────────────────────────
-function isTaskDone(task) {
-  if (!task) return false;
-
-  // 1. Champ natif OP — le plus fiable
-  if (task.isClosed === true) return true;
-
-  // 2. percentageDone = 100
-  const pct = Number(task.percentageDone ?? task.percentComplete ?? -1);
-  if (pct === 100) return true;
-
-  // 3. Titre du statut
-  const statusTitle = (
-    task._links?.status?.title ||
-    task.status?.title ||
-    task.statusExplained?.name ||
-    ""
-  ).toLowerCase().trim();
-  if (statusTitle && DONE_STATUSES.has(statusTitle)) return true;
-
-  // 4. Fallback href du statut
-  const statusHref = (task._links?.status?.href || "").toLowerCase();
-  if (statusHref && (statusHref.includes("closed") || statusHref.includes("done"))) return true;
-
-  return false;
-}
 
 // ──────────────────────────────────────────────────────────────────────────────
 //  getEstimatedHours — CORRECTION 1

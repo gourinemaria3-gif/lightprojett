@@ -17,6 +17,7 @@ const {
   deleteProject,
   syncProjectMembers,
   createProject,
+  addMember, 
 } = require("../services/openproject");
 const {
   getAllProjectsMeta,
@@ -173,7 +174,7 @@ router.get("/:projectId/members", async (req, res) => {
 // ══════════════════════════════════════════════════════════════════════════════
 //  POST /api/projects/:projectId/members
 // ══════════════════════════════════════════════════════════════════════════════
-router.post("/:projectId/members", requireManager, async (req, res) => {
+router.post("/:projectId/members", requireAdmin, async (req, res) => {
   const { projectId } = req.params;
   const { opUserId, name, email, role = "member", hourlyRate } = req.body;
 
@@ -182,23 +183,36 @@ router.post("/:projectId/members", requireManager, async (req, res) => {
   }
 
   if (!["manager", "member"].includes(role)) {
-    return res.status(400).json({ message: "Rôle invalide. Valeurs acceptées : manager, member." });
+    return res.status(400).json({ message: "Rôle invalide." });
   }
 
   let parsedHourlyRate = null;
   if (hourlyRate !== undefined && hourlyRate !== null && hourlyRate !== "") {
     parsedHourlyRate = Number(hourlyRate);
     if (isNaN(parsedHourlyRate) || parsedHourlyRate < 0) {
-      return res.status(400).json({ message: "Taux horaire invalide (doit être un nombre positif)." });
+      return res.status(400).json({ message: "Taux horaire invalide." });
     }
   }
 
   try {
+    // ← AJOUTE DANS OPENPROJECT EN PREMIER
+    try {
+       await addMember(projectId, opUserId, req.opToken, role); // ← ajoute role
+  console.log(`[members] User ${opUserId} ajouté dans OP avec rôle "${role}"`);
+} catch(opErr) {
+  const status = opErr.response?.status;
+  if (status !== 422 && status !== 409) {
+    console.warn(`[members] Avertissement OP addMember:`, opErr.response?.data?.message || opErr.message);
+  }
+    }
+
+    // Puis dans ta DB locale
     upsertUser(opUserId, { name, email: email || `user${opUserId}@openproject.local` });
     upsertProjectMember(opUserId, projectId, {
       role,
       hourlyRate: parsedHourlyRate,
     });
+
     const members = getProjectMembers(projectId);
     res.status(201).json(members);
   } catch (err) {
@@ -306,12 +320,38 @@ router.patch("/:projectId/members/:userId/rate", async (req, res) => {
 // ══════════════════════════════════════════════════════════════════════════════
 //  DELETE /api/projects/:projectId/members/:userId
 // ══════════════════════════════════════════════════════════════════════════════
-router.delete("/:projectId/members/:userId", requireManager, async (req, res) => {
+router.delete("/:projectId/members/:userId", requireAdmin, async (req, res) => {
   const { projectId, userId } = req.params;
 
-  const existing = getMemberRole(userId, projectId);
+  console.log(`[DELETE membre] projectId=${projectId} userId=${userId}`);
+
+  // Cherche par op_user_id OU par id local
+  let existing = getMemberRole(userId, projectId);
+  
+  // Si pas trouvé, cherche dans tous les membres du projet
   if (!existing) {
-    return res.status(404).json({ message: "Cet utilisateur n'est pas membre du projet." });
+    const allMembers = getProjectMembers(projectId);
+    console.log(`[DELETE membre] tous les membres:`, JSON.stringify(allMembers));
+    const found = allMembers.find(m => 
+      String(m.op_user_id) === String(userId) || 
+      String(m.id) === String(userId)
+    );
+    if (found) {
+      existing = found;
+      // Utilise op_user_id pour la suppression
+      try {
+        removeProjectMember(found.op_user_id, projectId);
+        return res.status(204).send();
+      } catch(err) {
+        return res.status(500).json({ message: "Erreur suppression.", detail: err.message });
+      }
+    }
+  }
+
+  if (!existing) {
+    return res.status(404).json({ 
+      message: `Membre introuvable (userId=${userId}).` 
+    });
   }
 
   try {

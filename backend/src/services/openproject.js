@@ -263,85 +263,67 @@ async function deleteTask(taskId, opToken) {
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  MEMBRES
-//
-//  CORRECTION CRITIQUE : N+1 requêtes → déduplique les userHref en amont,
-//  puis résout par batches de 5 (batchResolve).
-//  Avant : 10 projets × 10 membres = 100 requêtes simultanées → timeout.
-//  Après : collecte tous les hrefs uniques, résout 5 par 5.
 // ══════════════════════════════════════════════════════════════════════════════
-
 async function getMembers(opToken) {
-  // Étape 1 : récupère tous les projets
-  const projectsRes = await axios.get(`${BASE_URL}/api/v3/projects?pageSize=50`, {
-    headers: makeAuthHeader(opToken),
-    timeout: 8000,
-  });
-  const projects = projectsRes.data._embedded.elements || [];
+  try {
+    // Appel direct /api/v3/users — beaucoup plus simple et rapide
+    const res = await axios.get(`${BASE_URL}/api/v3/users`, {
+      headers: makeAuthHeader(opToken),
+      timeout: 15000,
+      params: {
+        pageSize: 500,
+        status: "active",
+      },
+    });
 
-  // Étape 2 : récupère tous les memberships (en parallèle, par projets)
-  const membershipResults = await Promise.allSettled(
-    projects.map((project) => {
-      const filters = encodeURIComponent(
-        JSON.stringify([{ project: { operator: "=", values: [String(project.id)] } }])
-      );
-      return axios.get(
-        `${BASE_URL}/api/v3/memberships?filters=${filters}&pageSize=100`,
-        { headers: makeAuthHeader(opToken), timeout: 8000 }
-      );
-    })
-  );
+    const users = res.data._embedded?.elements || [];
 
-  // Étape 3 : collecte les userHref uniques (déduplique ici, pas après)
-  const uniqueUserHrefs = new Set();
-  for (const result of membershipResults) {
-    if (result.status !== "fulfilled") continue;
-    const memberships = result.value.data._embedded?.elements || [];
-    for (const m of memberships) {
-      const userHref = m._links?.principal?.href;
-      if (!userHref) continue;
-      const userId = userHref.split("/").pop();
-      if (!userId || isNaN(Number(userId))) continue;
-      uniqueUserHrefs.add(userHref);
-    }
+    return users.map((u) => ({
+      id:    u.id,
+      name:  u.name || u.login || `Utilisateur #${u.id}`,
+      email: u.email || null,
+    }));
+
+  } catch (err) {
+    console.error("[getMembers] Erreur:", err.message);
+    // Fallback : retourne tableau vide plutôt que crash
+    return [];
   }
-
-  // Étape 4 : résout les users par batches de 5 (évite le flood)
-  const userHrefList = Array.from(uniqueUserHrefs);
-  const users = await batchResolve(userHrefList, async (userHref) => {
-    try {
-      const userRes = await axios.get(`${BASE_URL}${userHref}`, {
-        headers: makeAuthHeader(opToken),
-        timeout: 8000,
-      });
-      const u = userRes.data;
-      return {
-        id:    u.id,
-        name:  u.name || u.login || `Utilisateur #${u.id}`,
-        email: u.email || null,
-      };
-    } catch {
-      return null; // user inaccessible, ignoré
-    }
-  }, 5);
-
-  return users;
 }
 
-async function addMember(projectId, opUserId, opToken) {
+
+
+async function addMember(projectId, opUserId, opToken, role = "member") {
   const rolesRes = await axios.get(`${BASE_URL}/api/v3/roles`, {
     headers: makeAuthHeader(opToken),
     timeout: 8000,
   });
   const roles = rolesRes.data._embedded.elements;
-  const role = roles.find((r) => r.name.toLowerCase() === "project admin")
-            || roles.find((r) => r.name.toLowerCase() === "member")
-            || roles[0];
+  
+  console.log("[addMember] Rôles disponibles dans OP:", roles.map(r => r.name));
+
+  // Cherche le bon rôle selon ce qui est demandé
+  let selectedRole;
+  if (role === "manager") {
+    selectedRole = roles.find(r => r.name.toLowerCase().includes("project admin"))
+                || roles.find(r => r.name.toLowerCase().includes("manager"))
+                || roles.find(r => r.name.toLowerCase().includes("admin"));
+  } else {
+    selectedRole = roles.find(r => r.name.toLowerCase() === "member")
+                || roles.find(r => r.name.toLowerCase().includes("member"))
+                || roles.find(r => !r.name.toLowerCase().includes("admin"));
+  }
+
+  // Fallback
+  if (!selectedRole) selectedRole = roles[0];
+  
+  console.log(`[addMember] Rôle sélectionné pour "${role}":`, selectedRole.name);
 
   await axios.post(`${BASE_URL}/api/v3/memberships`, {
     _links: {
       project:   { href: `/api/v3/projects/${projectId}` },
       principal: { href: `/api/v3/users/${opUserId}` },
-      roles:     [{ href: role._links.self.href }],
+      roles:     [{ href: selectedRole._links.self.href }],
     },
   }, {
     headers: makeAuthHeader(opToken),

@@ -1,7 +1,15 @@
 import axios from "axios";
+import {
+  getCachedProjects,  cacheProjects,
+  getCachedTasks,     cacheTasks,
+  getCachedMembers,   cacheMembers,
+  getCachedStats,     cacheStats,
+  getCachedDashboard, cacheDashboard,
+  enqueueMutation,
+} from "./offlineDB";
 
 const api = axios.create({
-  baseURL: process.env.REACT_APP_API_URL || "http://localhost:5000",
+  baseURL: process.env.REACT_APP_API_URL || "https://localhost:5001",
   timeout: 15000,
   headers: {
     "Content-Type": "application/json",
@@ -121,11 +129,31 @@ function getAuthHeaders() {
 // ── Base URL helper (pour fetch natif) ────────────────────────
 const BASE_URL = process.env.REACT_APP_API_URL || "http://localhost:5000";
 
+// ── FIX 1 : Conversion heures → format ISO 8601 duration ─────
+// OpenProject attend "PT8H" pour 8h, "PT1H30M" pour 1h30, etc.
+// On centralise la conversion ici pour éviter de la dupliquer
+// dans chaque composant.
+function hoursToIsoDuration(hours) {
+  if (!hours && hours !== 0) return null;
+  const h = Number(hours);
+  if (isNaN(h) || h < 0) return null;
+  const wholeHours = Math.floor(h);
+  const minutes    = Math.round((h - wholeHours) * 60);
+  if (minutes > 0) return `PT${wholeHours}H${minutes}M`;
+  return `PT${wholeHours}H`;
+}
+
 // ══════════════════════════════════════════════════════════════
 //  PROJETS
 // ══════════════════════════════════════════════════════════════
 
 export async function fetchProjects({ page = 1, pageSize = 20, search = "" } = {}) {
+  // OFFLINE
+  if (!navigator.onLine) {
+    const cached = await getCachedProjects();
+    return cached ?? [];
+  }
+
   const cacheKey = `projects:${page}:${pageSize}:${search}`;
   const cached   = getFromCache(cacheKey);
   if (cached) return cached;
@@ -141,6 +169,7 @@ export async function fetchProjects({ page = 1, pageSize = 20, search = "" } = {
     : [];
 
   setInCache(cacheKey, projects, 60_000);
+  await cacheProjects(projects);
   return projects;
 }
 
@@ -223,6 +252,12 @@ export async function createSubProject(parentId, payload) {
 // ══════════════════════════════════════════════════════════════
 
 export async function fetchMembers() {
+  // OFFLINE
+  if (!navigator.onLine) {
+    const cached = await getCachedMembers("global");
+    return cached ?? [];
+  }
+
   const cacheKey = "members";
   const cached   = getFromCache(cacheKey);
   if (cached) return cached;
@@ -235,11 +270,19 @@ export async function fetchMembers() {
   }));
 
   setInCache(cacheKey, members, 300_000);
+  await cacheMembers("global", members);
   return members;
 }
 
 export async function fetchProjectMembers(projectId) {
+  // OFFLINE
+  if (!navigator.onLine) {
+    const cached = await getCachedMembers(projectId);
+    return cached ?? [];
+  }
+
   const res = await api.get(`/api/projects/${projectId}/members`);
+  await cacheMembers(projectId, res.data);
   return res.data;
 }
 
@@ -275,12 +318,19 @@ export async function updateMyHourlyRate(projectId, userId, hourlyRate) {
 export async function fetchTasks(projectId) {
   if (!projectId) throw new Error("projectId manquant.");
 
+  // OFFLINE
+  if (!navigator.onLine) {
+    const cached = await getCachedTasks(projectId);
+    return cached ?? [];
+  }
+
   const cacheKey = `tasks:${projectId}`;
   const cached   = getFromCache(cacheKey);
   if (cached) return cached;
 
   const res = await api.get(`/api/tasks/${projectId}`);
   setInCache(cacheKey, res.data, 30_000);
+  await cacheTasks(projectId, res.data);
   return res.data;
 }
 
@@ -303,8 +353,18 @@ export async function patchTask(taskId, lockVersion, body, projectId) {
   if (!taskId)    throw new Error("taskId manquant.");
   if (!projectId) throw new Error("projectId manquant.");
 
+  // OFFLINE → mise en queue
+  if (!navigator.onLine) {
+    await enqueueMutation({
+      url:         `${BASE_URL}/api/tasks/${taskId}`,
+      method:      "PATCH",
+      body:        { lockVersion, projectId, ...body },
+      description: `Modifier tâche #${taskId}`,
+    });
+    return { queued: true, offline: true };
+  }
+
   const res = await api.patch(`/api/tasks/${taskId}`, {
-    lockVersion,
     projectId,
     ...body,
   });
@@ -487,11 +547,33 @@ export async function fetchTaskBlockage({ title, description, status, daysStuck 
 }
 
 // ══════════════════════════════════════════════════════════════
+//  DASHBOARD
+// ══════════════════════════════════════════════════════════════
+
+export async function fetchDashboard() {
+  if (!navigator.onLine) {
+    const cached = await getCachedDashboard();
+    return cached ?? {};
+  }
+
+  const res = await api.get("/api/dashboard");
+  await cacheDashboard(res.data);
+  return res.data;
+}
+
+// ══════════════════════════════════════════════════════════════
 //  STATS
 // ══════════════════════════════════════════════════════════════
 
 export async function fetchStats(projectId) {
+  // OFFLINE
+  if (!navigator.onLine) {
+    const cached = await getCachedStats(projectId);
+    return cached ?? {};
+  }
+
   const res = await api.get(`/api/projects/${projectId}/stats`);
+  await cacheStats(projectId, res.data);
   return res.data;
 }
 
@@ -507,8 +589,13 @@ export async function fetchNotifications({ unreadOnly = false } = {}) {
 }
 
 export async function fetchNotificationCount() {
-  const res = await api.get("/api/notifications/count");
-  return res.data?.count ?? 0;
+  if (!navigator.onLine) return 0;
+  try {
+    const res = await api.get("/api/notifications/count");
+    return res.data?.count ?? 0;
+  } catch {
+    return 0;
+  }
 }
 
 export async function markNotificationRead(id) {
@@ -552,41 +639,56 @@ export async function updateNotificationSettings({ enabled, reminderDays }) {
 }
 
 // ══════════════════════════════════════════════════════════════
-//  ALIAS — compatibilité avec le fichier de ta collègue
-//  (ProjectsPage.jsx utilise ces noms-là)
+//  ALIAS — compatibilité avec ProjectsPage & ProjectDetailPage
 // ══════════════════════════════════════════════════════════════
 
-// getProjets retourne { data: [...] } pour matcher son code (pRes.data)
-export const getProjets = async (...args) => ({
-  data: await fetchProjects(...args),
-});
+export const getProjets        = async (...args) => ({ data: await fetchProjects(...args) });
+export const getStats          = async (projectId) => ({ data: await fetchStats(projectId) });
+export const getTaches         = async (projectId) => ({ data: await fetchTasks(projectId) });
+export const getProjectMembers = async (projectId) => ({ data: await fetchProjectMembers(projectId) });
 
-// getStats retourne { data: {...} } pour matcher son code (statsRes.data)
-export const getStats = async (projectId) => ({
-  data: await fetchStats(projectId),
-});
-
-// getTaches retourne { data: [...] } pour matcher son code (tachesRes.data)
-export const getTaches = async (projectId) => ({
-  data: await fetchTasks(projectId),
-});
-
-// getProjectMembers retourne { data: [...] } pour matcher son code (membersRes.data)
-export const getProjectMembers = async (projectId) => ({
-  data: await fetchProjectMembers(projectId),
-});
-
-// logout — utilisé dans son handleLogout
 export const logout = () => {
   localStorage.removeItem("jwt");
   localStorage.removeItem("user");
 };
-// updateTache — alias de patchTask (utilisé dans ProjectDetailPage.jsx)
-// Son code : updateTache(taskId, data) sans lockVersion ni projectId
-// On met lockVersion=1 par défaut et on extrait projectId du body si présent
-export const updateTache = (taskId, data) =>
-  api.patch(`/api/tasks/${taskId}`, data);
- 
-// deleteTache — alias de deleteTask (utilisé dans ProjectDetailPage.jsx)
-export const deleteTache = (taskId, projectId) =>
-  api.delete(`/api/tasks/${taskId}`, { data: { projectId } });
+
+// ── FIX 2 : updateTache — conversion estimatedHours → PT{n}H ─
+// OpenProject attend le format ISO 8601 duration pour le champ
+// estimatedTime. On convertit ici pour ne pas avoir à le faire
+// dans chaque composant.
+export const updateTache = (taskId, data) => {
+  const payload = { ...data };
+
+  // Si le composant envoie estimatedHours (nombre), on le convertit
+  // en estimatedTime au format ISO 8601 attendu par OpenProject.
+  if (payload.estimatedHours !== undefined && payload.estimatedHours !== null) {
+    const duration = hoursToIsoDuration(payload.estimatedHours);
+    if (duration) payload.estimatedTime = duration;
+    delete payload.estimatedHours; // OpenProject ignore ce champ brut
+  }
+
+  return api.patch(`/api/tasks/${taskId}`, payload);
+};
+
+export const deleteTache  = (taskId, projectId) => api.delete(`/api/tasks/${taskId}`, { data: { projectId } });
+
+// ── Alias manquants détectés par webpack ──────────────────────
+export const creerSousProjet          = createSubProject;
+export const creerTache               = createTask;
+export const deleteDependency         = removeDependency;
+export const updateProjectBudget      = updateBudget;
+export const updateTaskMemberRate     = setTaskMemberRate;
+export const updateTaskEstimatedHours = setTaskEstimatedHours;
+export const getTimeLogs              = fetchTimeLogs;
+export const getDependencies          = fetchDependencies;
+export const getAllMembers             = fetchMembers;
+export const getBudgetSummary         = fetchBudgetSummary;
+export const getBudgetTasks           = fetchBudgetByTask;
+export const getBudgetTimeline        = fetchBudgetTimeline;
+export const removeMember             = removeProjectMember;
+
+export async function syncProject(projectId) {
+  const res = await api.post(`/api/projects/${projectId}/sync`);
+  invalidateCache("projects:");
+  return res.data;
+}
